@@ -1,0 +1,8 @@
+streamlit>=1.28.0
+yt-dlp>=2025.12.8
+edge-tts>=7.2.1
+pydub>=0.25.1
+Pillow>=10.0.0
+requests>=2.31.0
+bilibili-api-python>=17.4.1
+numpy>=1.24.3
