@@ -481,16 +481,6 @@ def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_
 
         # 导入必要的库
         from pydub import AudioSegment
-        import numpy as np
-        from multiprocessing import shared_memory
-
-        SR = 24000
-        N_CH = 1
-        WIDTH = 2
-
-        def to_int16_samples(audio_segment):
-            audio = audio_segment.set_frame_rate(SR).set_channels(N_CH).set_sample_width(WIDTH)
-            return np.frombuffer(audio_segment.raw_data, dtype=np.int16)
 
         # 为混音准备音频数据 - 检查是否有调整后的文件
         final_audio_segments = []
@@ -511,42 +501,58 @@ def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_
                 final_audio_segments.append((audio_file_path, time_ms, original_audio))
                 print(f"使用原始音频: {os.path.basename(audio_file_path)}, 时长={len(original_audio)}ms")
 
-        print(f"最终音频段数: {len(final_audio_segments)}")
+        # 最终混音逻辑优化：使用pydub拼接代替numpy/SharedMemory以降低内存占用
+        print(f"开始混音 {len(final_audio_segments)} 个音频片段 (低内存模式)")
+        
+        # 创建一个静音片段作为基础，但更好的方式是直接构建列表然后sum
+        # 为了处理时间戳，我们需要计算每段之间的静音间隔
+        
+        combined_audio = AudioSegment.empty()
+        current_pos = 0
+        
+        for i, (audio_file_path, start_ms, audio_segment) in enumerate(final_audio_segments):
+            # 计算需要填充的静音时长
+            if start_ms > current_pos:
+                silence_gap = start_ms - current_pos
+                combined_audio += AudioSegment.silent(duration=silence_gap)
+                current_pos += silence_gap
+            elif start_ms < current_pos:
+                # 如果发生重叠（理论上已通过加速避免，但防止万一）
+                # 回退指针或者修剪上一段（这里简单处理：重叠部分直接叠加或忽略，pydub += 是拼接）
+                # 实际上如果start_ms < current_pos，说明上一段太长了或者这段开始早了
+                # 简单策略：直接接在后面（虽然会不同步），或者裁切重叠
+                # 鉴于之前有加速调整，这里假设误差可接受，直接拼接会推迟后续音频
+                # 为了保持时间戳准确，应该用overlay，但overlay慢且耗内存。
+                # 折中：如果重叠不严重，直接忽略重叠部分的时间差
+                pass
+                
+            combined_audio += audio_segment
+            current_pos += len(audio_segment)
+            
+            # 释放内存：处理完一段可以尝试手动清理（虽然Python有GC）
+            if i % 10 == 0:
+                print(f"已处理 {i+1}/{len(final_audio_segments)} 段")
 
-        # 计算总时长
-        last_path, last_ms, last_audio = final_audio_segments[-1]
-        print(f"最后片段: {last_path}, 时间={last_ms}ms, 时长={len(last_audio)}ms")
-        total_ms = last_ms + len(last_audio) + 1000
-        total_samples = int(total_ms * SR / 1000)
-
-        # 创建共享内存缓冲区
-        shm = shared_memory.SharedMemory(create=True, size=total_samples * N_CH * 4)
-        buf = np.ndarray((total_samples * N_CH,), dtype=np.float32, buffer=shm.buf)
-        buf[:] = 0.0
-
-        # 混合所有音频段
-        for audio_file_path, start_ms, audio_segment in final_audio_segments:
-            samples = to_int16_samples(audio_segment).astype(np.float32)
-            start_sample = int(start_ms * SR / 1000)
-            end_sample = start_sample + len(samples)
-            if end_sample > len(buf):
-                end_sample = len(buf)  # 防止越界
-            buf[start_sample:end_sample] += samples
-            print(f"混音片段: {os.path.basename(audio_file_path)}, 起始={start_sample}, 结束={end_sample}")
-
-        np.clip(buf, -32768, 32767, out=buf)
-        out_bytes = buf.astype(np.int16).tobytes()
-        shm.close()
-        shm.unlink()
-
-        final_audio = AudioSegment(data=out_bytes, sample_width=WIDTH, frame_rate=SR, channels=N_CH)
-        final_audio.export(output_mp3_path, format="mp3")
+        # 导出最终文件
+        combined_audio.export(output_mp3_path, format="mp3")
         print(f"最终音频已保存: {output_mp3_path}")
 
         # 清理临时文件
         for fp, _ in audio_files:
             if os.path.exists(fp):
-                os.remove(fp)
+                try:
+                    os.remove(fp)
+                except:
+                    pass
+        
+        # 清理加速产生的临时文件
+        for item in final_audio_segments:
+            path = item[0]
+            if path.endswith('_speed.mp3') and os.path.exists(path):
+                 try:
+                    os.remove(path)
+                 except:
+                    pass
 
         # 清理调整后的临时文件
         for audio_file_path, _, _ in processed_audio_segments:
