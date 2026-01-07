@@ -602,8 +602,14 @@ SEGMENT_SIZE = st.sidebar.slider("翻译分段大小", min_value=1, max_value=20
 
 st.markdown("---")
 
-TEMP_DIR = os.path.join(tempfile.gettempdir(), "yt_video_trans_temp")
-os.makedirs(TEMP_DIR, exist_ok=True)
+TEMP_DIR = os.path.join(os.getcwd(), "temp_storage")
+if not os.path.exists(TEMP_DIR):
+    try:
+        os.makedirs(TEMP_DIR, exist_ok=True)
+    except Exception as e:
+        # 如果当前目录不可写，再退回到系统临时目录
+        TEMP_DIR = os.path.join(tempfile.gettempdir(), "yt_video_trans_temp")
+        os.makedirs(TEMP_DIR, exist_ok=True)
 
 temp_dir = None
 
