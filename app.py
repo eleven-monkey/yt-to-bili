@@ -54,6 +54,8 @@ def load_env_config():
     for key in target_keys:
         env_val = os.getenv(key)
         if env_val:
+            if key == "YT_COOKIES":
+                env_val = env_val.replace("\\n", "\n")
             config[key] = env_val
             
     # 兼容旧的/拼写错误的变量名 BILI_SESSIDATA -> BILI_SESSDATA
