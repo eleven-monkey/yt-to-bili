@@ -8,6 +8,8 @@ import subprocess
 import asyncio
 import glob
 import random
+import threading
+from datetime import datetime
 from pathlib import Path
 import tempfile
 import zipfile
@@ -66,6 +68,372 @@ def load_env_config():
 
 env_config = load_env_config()
 
+# --- 状态管理与后台任务相关 ---
+STATUS_FILE = "workflow_status.json"
+
+class WorkflowManager:
+    @staticmethod
+    def get_status_file_path(temp_dir):
+        return os.path.join(temp_dir, STATUS_FILE)
+
+    @staticmethod
+    def init_status(temp_dir):
+        status = {
+            "is_running": True,
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "steps": {
+                "下载字幕": {"status": "pending", "message": ""},
+                "翻译标题": {"status": "pending", "message": ""},
+                "翻译字幕": {"status": "pending", "message": ""},
+                "转语音": {"status": "pending", "message": ""},
+                "下载视频": {"status": "pending", "message": ""},
+                "处理封面": {"status": "pending", "message": ""},
+                "上传B站": {"status": "pending", "message": ""}
+            },
+            "results": {},
+            "error": None,
+            "logs": []
+        }
+        WorkflowManager.save_status(temp_dir, status)
+        return status
+
+    @staticmethod
+    def load_status(temp_dir):
+        file_path = WorkflowManager.get_status_file_path(temp_dir)
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def save_status(temp_dir, status):
+        file_path = WorkflowManager.get_status_file_path(temp_dir)
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(status, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存状态失败: {e}")
+
+    @staticmethod
+    def update_step(temp_dir, step_name, status_code, message=""):
+        """
+        status_code: pending, running, success, error
+        """
+        current_status = WorkflowManager.load_status(temp_dir)
+        if current_status:
+            if step_name in current_status["steps"]:
+                current_status["steps"][step_name]["status"] = status_code
+                current_status["steps"][step_name]["message"] = message
+            current_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {step_name}: {status_code} - {message}")
+            WorkflowManager.save_status(temp_dir, current_status)
+
+    @staticmethod
+    def mark_completed(temp_dir, results=None):
+        current_status = WorkflowManager.load_status(temp_dir)
+        if current_status:
+            current_status["is_running"] = False
+            if results:
+                current_status["results"].update(results)
+            WorkflowManager.save_status(temp_dir, current_status)
+
+    @staticmethod
+    def mark_error(temp_dir, error_msg):
+        current_status = WorkflowManager.load_status(temp_dir)
+        if current_status:
+            current_status["is_running"] = False
+            current_status["error"] = error_msg
+            WorkflowManager.save_status(temp_dir, current_status)
+
+def background_workflow_task(config):
+    """
+    后台运行的工作流主函数
+    config: 包含所有必要参数的字典
+    """
+    temp_dir = config['temp_dir']
+    workflow_url = config['workflow_url']
+    auto_upload = config['auto_upload']
+    
+    # 初始化状态
+    WorkflowManager.init_status(temp_dir)
+    
+    try:
+        subtitles_dir = os.path.join(temp_dir, "subtitles")
+        os.makedirs(subtitles_dir, exist_ok=True)
+        
+        # --- 步骤1: 下载字幕 ---
+        WorkflowManager.update_step(temp_dir, "下载字幕", "running", "正在下载字幕...")
+        
+        cookies_file_path = None
+        if config.get('yt_cookies', '').strip():
+            cookies_file_path = os.path.join(temp_dir, "youtube_cookies.txt")
+            with open(cookies_file_path, 'w', encoding='utf-8') as f:
+                f.write(config['yt_cookies'].strip())
+        
+        ydl_opts = {
+            'writeautomaticsub': True,
+            'skip_download': True,
+            'subtitleslangs': ['en'],
+            'quiet': True,
+            'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s')
+        }
+        
+        if cookies_file_path:
+            ydl_opts['cookiefile'] = cookies_file_path
+        
+        # 重试机制
+        def retry_op(func, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    return func()
+                except Exception as e:
+                    if attempt == max_retries - 1: raise e
+                    time.sleep(2 ** attempt)
+
+        def dl_sub():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([workflow_url])
+            vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
+            if not vtt_files: raise Exception("未找到VTT文件")
+            original_file = vtt_files[0]
+            new_file = os.path.join(subtitles_dir, "word_level.vtt")
+            # 如果存在则覆盖
+            if os.path.exists(new_file): os.remove(new_file)
+            os.rename(original_file, new_file)
+            return new_file
+
+        vtt_file_path = retry_op(dl_sub)
+        WorkflowManager.update_step(temp_dir, "下载字幕", "success", f"已保存: {os.path.basename(vtt_file_path)}")
+        
+        # --- 步骤2: 翻译标题 ---
+        WorkflowManager.update_step(temp_dir, "翻译标题", "running", "正在分析视频信息...")
+        
+        def trans_title():
+            ydl_info_opts = {'skip_download': True, 'quiet': True}
+            if cookies_file_path: ydl_info_opts['cookiefile'] = cookies_file_path
+            
+            with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
+                info_dict = ydl.extract_info(workflow_url, download=False)
+                original_title = info_dict.get('title', '')
+            
+            if not original_title: raise Exception("无法获取标题")
+            
+            # 调用API翻译
+            headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
+            
+            # 标题翻译
+            payload = {
+                "model": config['model_name'],
+                "messages": [
+                    {"role": "system", "content": "你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"},
+                    {"role": "user", "content": original_title}
+                ]
+            }
+            resp = requests.post(config['api_url'], json=payload, headers=headers, timeout=60)
+            translated_title = resp.json()['choices'][0]['message']['content'].replace('**', '').strip()
+            
+            # 标签生成
+            tags_payload = {
+                "model": config['model_name'],
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的B站运营助手"},
+                    {"role": "user", "content": f"根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：\n标题：{translated_title}\n只输出标签，不要其他内容。"}
+                ]
+            }
+            tags_resp = requests.post(config['api_url'], json=tags_payload, headers=headers, timeout=60)
+            tags_str = tags_resp.json()['choices'][0]['message']['content']
+            tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
+            
+            # 保存上传配置
+            upload_data = {'title_desc': f'(中配){translated_title}', 'tags': tags_list}
+            with open(os.path.join(subtitles_dir, "upload_config.pkl"), 'wb') as f:
+                pickle.dump(upload_data, f)
+                
+            return translated_title, tags_list
+            
+        translated_title, tags_list = retry_op(trans_title)
+        WorkflowManager.update_step(temp_dir, "翻译标题", "success", f"标题: {translated_title}")
+        
+        # --- 步骤3: 翻译字幕 ---
+        WorkflowManager.update_step(temp_dir, "翻译字幕", "running", "AI正在翻译中(可能较慢)...")
+        # 注意：这里调用全局函数，它会打印日志到stdout，但我们需要它正常运行
+        # 我们可以暂时不捕获它的详细进度，或者修改原函数。为保持最小改动，直接调用。
+        # 这里的全局变量 API_URL, API_KEY 等需要在调用前临时覆盖吗？
+        # 全局函数 translate_subtitles_from_vtt 使用了全局变量 API_URL 等。
+        # 在多线程环境下修改全局变量是危险的。
+        # 但这里我们可以利用 python 的动态性，或者假设 config 中的值和全局的一致。
+        # 实际上 app.py 里的 API_URL 是从 st.sidebar 获取的，在后台线程里无法访问 st.sidebar。
+        # 必须确保全局变量被正确设置，或者重构 translate_subtitles_from_vtt 接受参数。
+        # 为了安全，我们这里做一个简单的 trick：在 app.py 顶层，API_URL 等是全局变量。
+        # 用户在 UI 修改后，这些全局变量并没有变（它们只是脚本顶层的初始值）。
+        # st.sidebar 的值是在 st 运行时获取的。
+        # 这是一个潜在 BUG：原代码中 translate_subtitles_from_vtt 直接用了 API_URL。
+        # 在 Streamlit 中，每次 rerun 整个脚本从头跑，全局变量重置。
+        # 当点击按钮时，API_URL 是当前局部变量（如果是通过 st.sidebar... 返回的）。
+        # 原代码中：API_URL = st.sidebar.text_input(...)
+        # 所以 API_URL 在脚本执行域中是存在的。
+        # 但是，当线程运行时，如果主线程（Streamlit runner）结束或 rerun，这些模块级变量还在吗？
+        # 在 Streamlit 中，模块级别的变量是跨 session 共享的（如果不是在函数内定义）。
+        # 但 API_URL = st.sidebar... 是在脚本执行流中定义的。
+        # 为了确保后台线程能拿到正确的配置，我们需要修改 translate_subtitles_from_vtt 
+        # 或者临时设置全局变量（不推荐）。
+        # 最稳妥的方法：修改 translate_subtitles_from_vtt 签名接受 api_key 等参数。
+        # 但用户要求 "不要着急编码" 且 "mimic style"，我选择一种侵入性小的方法：
+        # 将配置注入到全局（虽然有点脏，但在单实例容器中可行），或者最好稍微修改一下 translate_subtitles_from_vtt。
+        # 让我们看看 translate_subtitles_from_vtt 定义。它确实使用了全局 API_URL。
+        # 我们可以使用 unittest.mock.patch 或者简单的 global 赋值来确保线程内看到的变量是对的。
+        # 但由于这是多线程，修改全局变量会影响其他用户（虽然 streamlit 通常单实例）。
+        # 更好的方案：传递参数。
+        # 我将修改 translate_subtitles_from_vtt 及其调用的函数，但这改动大。
+        # 让我们用 global 变量注入的方式（在线程开始前，或者假设用户没有变）。
+        # 实际上，我们可以重写 translate_subtitles_from_vtt 的部分逻辑在线程里，或者，
+        # 鉴于 `translate_subtitles_from_vtt` 就在 `app.py` 里，
+        # 我可以简单地将这些配置作为参数传递给 `translate_subtitles_from_vtt`，给它加默认参数=None，如果None则取全局。
+        # 这样改动最小。
+        
+        # 稍后我会微调 translate_subtitles_from_vtt。现在先假设它能工作（如果它引用的全局变量被正确闭包捕获）。
+        # 实际上 python 的闭包是迟绑定的。
+        # 为了稳妥，我在 background_workflow_task 里定义一个 wrapper 或者 monkeypatch。
+        # 让我们尝试一种 Pythonic 的方法：动态修改全局变量上下文？不，太黑魔法。
+        # 我将修改 `translate_subtitles_from_vtt` 接受可选的 api_config 参数。
+        
+        txt_file_path = translate_subtitles_from_vtt(vtt_file_path, api_config={
+            "API_URL": config['api_url'],
+            "API_KEY": config['api_key'],
+            "MODEL_NAME": config['model_name'],
+            "MAX_WORKERS": config['max_workers'],
+            "SEGMENT_SIZE": config['segment_size']
+        })
+        
+        WorkflowManager.update_step(temp_dir, "翻译字幕", "success", f"已保存: {os.path.basename(txt_file_path)}")
+        
+        # --- 步骤4: 转语音 ---
+        WorkflowManager.update_step(temp_dir, "转语音", "running", "正在进行TTS转换...")
+        
+        output_mp3 = os.path.join(subtitles_dir, os.path.splitext(os.path.basename(vtt_file_path))[0] + "_translated.mp3")
+        # 同理，process_tts_with_speed_adjustment 也需要 config
+        mp3_file_path = process_tts_with_speed_adjustment(txt_file_path, output_mp3, subtitles_dir, tts_config={
+            "TEMP_DIR": temp_dir,
+            "SELECTED_VOICE": config['voice_choice']
+        })
+        
+        if not mp3_file_path: raise Exception("TTS转换失败")
+        WorkflowManager.update_step(temp_dir, "转语音", "success", f"已生成: {os.path.basename(mp3_file_path)}")
+        
+        # --- 步骤5: 下载视频 ---
+        WorkflowManager.update_step(temp_dir, "下载视频", "running", "下载并合并视频...")
+        
+        def dl_video():
+            dl_base = os.path.join(temp_dir, "subtitles", "downloaded_video")
+            ydl_v_opts = {
+                'format': 'best',
+                'outtmpl': f'{dl_base}.%(ext)s',
+                'noplaylist': True,
+            }
+            if cookies_file_path: ydl_v_opts['cookiefile'] = cookies_file_path
+            
+            with yt_dlp.YoutubeDL(ydl_v_opts) as ydl:
+                ydl.extract_info(workflow_url, download=True)
+            
+            dl_files = glob.glob(f"{dl_base}.*")
+            if not dl_files: raise Exception("视频文件未找到")
+            
+            raw_video = dl_files[0]
+            final_vid = os.path.splitext(mp3_file_path)[0] + ".mp4"
+            
+            subprocess.run(['ffmpeg', '-y', '-i', raw_video, '-i', mp3_file_path,
+                           '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
+                           final_vid], check=True, capture_output=True)
+            
+            if os.path.exists(raw_video): os.remove(raw_video)
+            return final_vid
+            
+        final_video_path = retry_op(dl_video)
+        WorkflowManager.update_step(temp_dir, "下载视频", "success", f"最终视频: {os.path.basename(final_video_path)}")
+        
+        # --- 步骤6: 处理封面 ---
+        WorkflowManager.update_step(temp_dir, "处理封面", "running", "优化封面图片...")
+        
+        def proc_cover():
+            ydl_cov_opts = {
+                'skip_download': True, 'writethumbnail': True,
+                'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
+                'noplaylist': True
+            }
+            if cookies_file_path: ydl_cov_opts['cookiefile'] = cookies_file_path
+            
+            with yt_dlp.YoutubeDL(ydl_cov_opts) as ydl:
+                ydl.extract_info(workflow_url, download=True)
+            
+            # 寻找封面文件
+            cover_candidates = list(Path(os.path.join(temp_dir, "subtitles")).glob("cover.*"))
+            # 排除已经是jpeg的防止重复处理
+            src_cover = None
+            for c in cover_candidates:
+                if c.suffix.lower() in ['.webp', '.jpg', '.png']:
+                    src_cover = c
+                    break
+            
+            if not src_cover: return "无封面" # 应该不会发生
+            
+            out_cover = os.path.join(temp_dir, "subtitles", "cover.jpeg")
+            qual = 90
+            with Image.open(src_cover) as img:
+                if img.mode != 'RGB': img = img.convert('RGB')
+                img.save(out_cover, 'jpeg', quality=qual)
+                
+                # 压缩到合适大小
+                while os.path.getsize(out_cover) / 1024 > 50 and qual > 10:
+                    qual -= 5
+                    img.save(out_cover, 'jpeg', quality=qual)
+            return out_cover
+
+        cover_path = retry_op(proc_cover)
+        WorkflowManager.update_step(temp_dir, "处理封面", "success", "封面处理完成")
+        
+        results = {
+            "vtt": vtt_file_path,
+            "txt": txt_file_path,
+            "mp3": mp3_file_path,
+            "video": final_video_path,
+            "cover": cover_path
+        }
+        
+        # --- 步骤7: 上传B站 ---
+        if auto_upload:
+            WorkflowManager.update_step(temp_dir, "上传B站", "running", "正在上传到B站...")
+            
+            credential = Credential(sessdata=config['bili_sess'], bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26")
+            vu_meta = VideoMeta(
+                tid=130, title=translated_title, tags=tags_list,
+                desc=translated_title, cover=cover_path, no_reprint=True
+            )
+            
+            async def upload_task():
+                page = VideoUploaderPage(path=final_video_path, title=translated_title, description=translated_title)
+                uploader = video_uploader.VideoUploader([page], vu_meta, credential, line=video_uploader.Lines.QN)
+                await uploader.start()
+            
+            # 在新事件循环运行
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(upload_task())
+            loop.close()
+            
+            WorkflowManager.update_step(temp_dir, "上传B站", "success", "上传成功！")
+        else:
+            WorkflowManager.update_step(temp_dir, "上传B站", "success", "跳过上传")
+
+        WorkflowManager.mark_completed(temp_dir, results)
+
+    except Exception as e:
+        import traceback
+        err_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"后台任务出错: {err_msg}")
+        WorkflowManager.mark_error(temp_dir, str(e))
+
 def clear_temp_directory():
     """清空temp目录下的所有内容"""
     import shutil
@@ -88,8 +456,15 @@ def clear_temp_directory():
         print(f"清空temp目录失败: {e}")
 
 # 翻译字幕相关函数
-def translate_subtitles_from_vtt(vtt_file_path):
+def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
     """从VTT文件翻译字幕，生成带时间戳的文本文件（单步执行的完整逻辑）"""
+    # 获取配置，如果未提供则使用全局变量
+    cfg_api_url = api_config.get("API_URL", API_URL) if api_config else API_URL
+    cfg_api_key = api_config.get("API_KEY", API_KEY) if api_config else API_KEY
+    cfg_model = api_config.get("MODEL_NAME", MODEL_NAME) if api_config else MODEL_NAME
+    cfg_max_workers = api_config.get("MAX_WORKERS", MAX_WORKERS) if api_config else MAX_WORKERS
+    cfg_seg_size = api_config.get("SEGMENT_SIZE", SEGMENT_SIZE) if api_config else SEGMENT_SIZE
+
     def vtt_to_sentences(vtt_text):
         """将带逐词时间戳的VTT转换为按句分段的文本"""
         # 正则：cue 头（起止时间）
@@ -192,7 +567,7 @@ def translate_subtitles_from_vtt(vtt_file_path):
 
     for i, paragraph in enumerate(paragraphs):
         paragraph_char_count = len(paragraph)
-        if (len(current_batch) >= SEGMENT_SIZE) or (current_char_count + paragraph_char_count > 2000 and current_batch):
+        if (len(current_batch) >= cfg_seg_size) or (current_char_count + paragraph_char_count > 2000 and current_batch):
             batched_paragraphs.append("\n".join(current_batch))
             print(f"调试信息：分段 {len(batched_paragraphs)} 包含 {len(current_batch)} 个段落，共 {current_char_count} 字符")
             current_batch = [paragraph]
@@ -212,13 +587,13 @@ def translate_subtitles_from_vtt(vtt_file_path):
             print(f"调试信息：开始翻译分段 {batch_index}，内容长度: {len(batch)} 字符")
             print(f"分段内容预览: {batch[:200]}...")
 
-            url = API_URL
+            url = cfg_api_url
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}"
+                "Authorization": f"Bearer {cfg_api_key}"
             }
             payload = {
-                "model": MODEL_NAME,
+                "model": cfg_model,
                 "messages": [
                     {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
                     {"role": "user", "content": batch}
@@ -241,7 +616,7 @@ def translate_subtitles_from_vtt(vtt_file_path):
             return f"Error: {str(e)}"
 
     translated_results = {}
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=cfg_max_workers) as executor:
         futures = {executor.submit(translate_batch, batch, i): i for i, batch in enumerate(batched_paragraphs)}
         for future in as_completed(futures):
             index = futures[future]
@@ -353,8 +728,11 @@ def adjust_audio_speed(task):
             os.remove(temp_output_processed)
         return i, None, f"音频速度调整失败 {i+1}: {e}"
 
-def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_dir):
+def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_dir, tts_config=None):
     """处理TTS转换并进行音频速度调整以避免重叠"""
+    cfg_temp_dir = tts_config.get("TEMP_DIR", TEMP_DIR) if tts_config else TEMP_DIR
+    cfg_voice = tts_config.get("SELECTED_VOICE", SELECTED_VOICE) if tts_config else SELECTED_VOICE
+
     print("="*50, flush=True)
     print("开始TTS转换流程", flush=True)
     print("="*50, flush=True)
@@ -388,14 +766,14 @@ def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_
         for i, (ts, txt) in enumerate(segments[:3]):
             print(f"  {i+1}: ({ts}) {txt[:50]}...", flush=True)
 
-    temp_dir = os.path.dirname(output_mp3_path) if os.path.dirname(output_mp3_path) else TEMP_DIR
+    temp_dir = os.path.dirname(output_mp3_path) if os.path.dirname(output_mp3_path) else cfg_temp_dir
 
     tasks = []
     for i, (timestamp, txt) in enumerate(segments):
         cleaned_timestamp = re.sub(r'[^\w\d]+', '_', timestamp)
         file_name = f"{cleaned_timestamp}.mp3"
         output_file = os.path.join(temp_dir, file_name)
-        tasks.append((i, timestamp, txt, temp_dir, SELECTED_VOICE))
+        tasks.append((i, timestamp, txt, temp_dir, cfg_voice))
 
     with ProcessPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(process_segment, task) for task in tasks]
@@ -662,456 +1040,118 @@ with tab0:
     }
     </style>
     <div class="workflow-container">
-        <h1 style="text-align:center; margin-bottom:1rem;">🚀 一键工作流</h1>
-        <p style="text-align:center; opacity:0.9;">全自动完成从YouTube到B站的视频搬运</p>
+        <h1 style="text-align:center; margin-bottom:1rem;">🚀 一键工作流 (后台版)</h1>
+        <p style="text-align:center; opacity:0.9;">任务在后台运行，您可以放心刷新或关闭页面</p>
     </div>
     """, unsafe_allow_html=True)
     
     st.markdown("---")
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        workflow_url = st.text_input("YouTube视频URL", placeholder="https://www.youtube.com/watch?v=...", key="workflow_url")
-    with col2:
-        auto_upload = st.checkbox("自动上传到B站", value=True, help="勾选后完成所有步骤会自动上传，否则只处理到封面")
+    # 检查当前状态
+    current_status = WorkflowManager.load_status(TEMP_DIR)
+    is_running = current_status and current_status.get("is_running", False)
     
-    st.markdown("---")
-    
-    progress_container = st.container()
-    
-    if st.button("🚀 开始一键工作流", type="primary", use_container_width=True):
-        if not workflow_url:
-            st.error("请输入YouTube视频URL")
-        else:
-            # 清空temp目录
-            clear_temp_directory()
-
-            status_container = st.container()
+    if is_running:
+        st.info(f"🔄 任务正在后台运行中... (开始时间: {current_status.get('start_time')})")
+        
+        # 显示进度
+        steps = current_status.get("steps", {})
+        
+        for step_name, step_info in steps.items():
+            status = step_info.get("status", "pending")
+            msg = step_info.get("message", "")
             
-            steps_status = {
-                "下载字幕": {"status": "pending", "message": ""},
-                "翻译标题": {"status": "pending", "message": ""},
-                "翻译字幕": {"status": "pending", "message": ""},
-                "转语音": {"status": "pending", "message": ""},
-                "下载视频": {"status": "pending", "message": ""},
-                "处理封面": {"status": "pending", "message": ""},
-                "上传B站": {"status": "pending", "message": ""}
-            }
+            icon = "⏳"
+            css_class = "step-card"
+            if status == "running":
+                icon = "🔄"
+                css_class = "step-card step-running"
+            elif status == "success":
+                icon = "✅"
+                css_class = "step-card step-success"
+            elif status == "error":
+                icon = "❌"
+                css_class = "step-card step-error"
             
-            def update_step_status(step_name, status, message=""):
-                steps_status[step_name]["status"] = status
-                steps_status[step_name]["message"] = message
-                
-                status_dict = {
-                    "pending": "⏳",
-                    "running": "🔄",
-                    "success": "✅",
-                    "error": "❌"
-                }
-                
-                step_class = {
-                    "pending": "step-card",
-                    "running": "step-card step-running",
-                    "success": "step-card step-success",
-                    "error": "step-card step-error"
-                }
-                
-                return status_dict[status], step_class[status]
+            st.markdown(f"""
+            <div class="{css_class}">
+                <strong>{icon} {step_name}</strong><br/>
+                <span style="opacity:0.8; font-size:0.9em">{msg}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # 显示日志
+        with st.expander("查看详细日志", expanded=True):
+            logs = current_status.get("logs", [])
+            for log in logs[-10:]:  # 只显示最后10条
+                st.text(log)
+        
+        # 自动刷新逻辑
+        time.sleep(2)
+        try:
+            st.rerun()
+        except AttributeError:
+            st.experimental_rerun()
             
-            def retry_with_backoff(func, max_retries=3, step_name="操作"):
-                for attempt in range(max_retries):
-                    try:
-                        return func()
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            delay = 2 ** attempt
-                            current_attempt = attempt + 1
-                            retry_msg = f"{step_name}失败，{delay}秒后重试 ({current_attempt}/{max_retries}): {str(e)}"
-                            st.warning(retry_msg)
-                            time.sleep(delay)
-                        else:
-                            raise e
-            
-            try:
-                subtitles_dir = os.path.join(TEMP_DIR, "subtitles")
-                os.makedirs(subtitles_dir, exist_ok=True)
-                
-                with status_container:
-                    st.markdown("## 📋 工作流进度")
-                    
-                    icon1, class1 = update_step_status("下载字幕", "running")
-                    st.markdown(f"""
-                    <div class="{class1}">
-                        <strong>{icon1} 步骤1: 下载字幕</strong><br/>
-                        <span id="msg1"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step1_download_subtitles():
-                        cookies_file_path = None
-                        if YT_COOKIES.strip():
-                            cookies_file_path = os.path.join(TEMP_DIR, "youtube_cookies.txt")
-                            with open(cookies_file_path, 'w', encoding='utf-8') as f:
-                                f.write(YT_COOKIES.strip())
-                        
-                        ydl_opts = {
-                            'writeautomaticsub': True,
-                            'skip_download': True,
-                            'subtitleslangs': ['en'],
-                            'quiet': True,
-                            'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s')
-                        }
-                        
-                        if cookies_file_path:
-                            ydl_opts['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([workflow_url])
-                        
-                        vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
-                        if vtt_files:
-                            original_file = vtt_files[0]
-                            new_file = os.path.join(subtitles_dir, "word_level.vtt")
-                            os.rename(original_file, new_file)
-                            return new_file
-                        return None
-                    
-                    vtt_file_path = retry_with_backoff(step1_download_subtitles, max_retries=3, step_name="下载字幕")
-                    
-                    icon1, class1 = update_step_status("下载字幕", "success", f"成功: {vtt_file_path}")
-                    st.markdown(f"""
-                    <div class="{class1}">
-                        <strong>{icon1} 步骤1: 下载字幕</strong><br/>
-                        {vtt_file_path}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    icon2, class2 = update_step_status("翻译标题", "running")
-                    st.markdown(f"""
-                    <div class="{class2}">
-                        <strong>{icon2} 步骤2: 翻译标题</strong><br/>
-                        <span id="msg2"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step2_translate_title():
-                        ydl_info_opts = {
-                            'skip_download': True,
-                            'quiet': True,
-                        }
-                        
-                        cookies_file_path = None
-                        if YT_COOKIES.strip():
-                            cookies_file_path = os.path.join(TEMP_DIR, "youtube_cookies.txt")
-                        
-                        if cookies_file_path and os.path.exists(cookies_file_path):
-                            ydl_info_opts['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
-                            info_dict = ydl.extract_info(workflow_url, download=False)
-                            original_title = info_dict.get('title', '')
-                        
-                        if not original_title:
-                            raise Exception("无法获取视频标题")
-                        
-                        SYSTEM_PROMPT = """你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"""
-                        
-                        payload = {
-                            "model": MODEL_NAME,
-                            "messages": [
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": original_title}
-                            ]
-                        }
-                        headers = {
-                            "Authorization": f"Bearer {API_KEY}",
-                            "Content-Type": "application/json"
-                        }
-                        
-                        response = requests.post(API_URL, json=payload, headers=headers, timeout=60)
-                        response_data = response.json()
-                        
-                        translated_title_with_markdown = response_data['choices'][0]['message']['content']
-                        translated_title = translated_title_with_markdown.replace('**', '').strip()
-                        
-                        TAGS_PROMPT = f"""根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：
-标题：{translated_title}
-示例标签：科技,人工智能,AI,机器学习,未来
-只输出标签，不要其他内容。"""
-                        
-                        tags_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [
-                                {"role": "system", "content": "你是一个专业的B站运营助手"},
-                                {"role": "user", "content": TAGS_PROMPT}
-                            ]
-                        }
-                        
-                        tags_response = requests.post(API_URL, json=tags_payload, headers=headers, timeout=60)
-                        tags_data = tags_response.json()
-                        
-                        tags_content = tags_data['choices'][0]['message']['content']
-                        tags_list = [t.strip() for t in tags_content.replace('，', ',').split(',') if t.strip()]
-                        # 限制tags数量不超过10个
-                        tags_list = tags_list[:10]
-
-                        upload_config_file = os.path.join(subtitles_dir, "upload_config.pkl")
-                        upload_data = {
-                            'title_desc': f'(中配){translated_title}',
-                            'tags': tags_list
-                        }
-                        
-                        with open(upload_config_file, 'wb') as f:
-                            pickle.dump(upload_data, f)
-                        
-                        return translated_title, tags_list
-                    
-                    translated_title, tags_list = retry_with_backoff(step2_translate_title, max_retries=3, step_name="翻译标题")
-                    
-                    icon2, class2 = update_step_status("翻译标题", "success", f"标题: {translated_title}")
-                    st.markdown(f"""
-                    <div class="{class2}">
-                        <strong>{icon2} 步骤2: 翻译标题</strong><br/>
-                        {translated_title}<br/>
-                        标签: {', '.join(tags_list)}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    icon3, class3 = update_step_status("翻译字幕", "running")
-                    st.markdown(f"""
-                    <div class="{class3}">
-                        <strong>{icon3} 步骤3: 翻译字幕</strong><br/>
-                        <span id="msg3"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step3_translate_subtitles():
-                        # 直接调用单步执行的翻译字幕逻辑
-                        return translate_subtitles_from_vtt(vtt_file_path)
-                    
-                    txt_file_path = retry_with_backoff(step3_translate_subtitles, max_retries=3, step_name="翻译字幕")
-                    
-                    icon3, class3 = update_step_status("翻译字幕", "success", f"保存到: {txt_file_path}")
-                    st.markdown(f"""
-                    <div class="{class3}">
-                        <strong>{icon3} 步骤3: 翻译字幕</strong><br/>
-                        {txt_file_path}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    icon4, class4 = update_step_status("转语音", "running")
-                    st.markdown(f"""
-                    <div class="{class4}">
-                        <strong>{icon4} 步骤4: 转语音</strong><br/>
-                        <span id="msg4"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step4_tts():
-                        output_mp3 = os.path.join(subtitles_dir, os.path.splitext(os.path.basename(vtt_file_path))[0] + "_translated.mp3")
-                        result = process_tts_with_speed_adjustment(txt_file_path, output_mp3, subtitles_dir)
-                        return result
-                    
-                    mp3_file_path = retry_with_backoff(step4_tts, max_retries=3, step_name="转语音")
-                    
-                    icon4, class4 = update_step_status("转语音", "success", f"保存到: {mp3_file_path}")
-                    st.markdown(f"""
-                    <div class="{class4}">
-                        <strong>{icon4} 步骤4: 转语音</strong><br/>
-                        {mp3_file_path}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    icon5, class5 = update_step_status("下载视频", "running")
-                    st.markdown(f"""
-                    <div class="{class5}">
-                        <strong>{icon5} 步骤5: 下载视频</strong><br/>
-                        <span id="msg5"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step5_download_video():
-                        downloaded_video_base_name = os.path.join(TEMP_DIR, "subtitles", "downloaded_video")
-                        
-                        ydl_opts_video_only = {
-                            'format': 'best',
-                            'outtmpl': f'{downloaded_video_base_name}.%(ext)s',
-                            'noplaylist': True,
-                        }
-                        
-                        cookies_file_path = None
-                        if YT_COOKIES.strip():
-                            cookies_file_path = os.path.join(TEMP_DIR, "youtube_cookies.txt")
-                        
-                        if cookies_file_path:
-                            ydl_opts_video_only['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_opts_video_only) as ydl:
-                            ydl.extract_info(workflow_url, download=True)
-                        
-                        downloaded_files = glob.glob(f"{downloaded_video_base_name}.*")
-                        if downloaded_files:
-                            actual_downloaded_video_path = downloaded_files[0]
-                            
-                            if os.path.exists(mp3_file_path):
-                                final_video_path = os.path.splitext(mp3_file_path)[0] + ".mp4"
-                                subprocess.run(['ffmpeg', '-y', '-i', actual_downloaded_video_path, '-i', mp3_file_path,
-                                                    '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
-                                                    final_video_path], check=True, capture_output=True, text=True)
-                                
-                                if os.path.exists(actual_downloaded_video_path):
-                                    os.remove(actual_downloaded_video_path)
-                                
-                                return final_video_path
-                        
-                        raise FileNotFoundError("视频下载失败")
-                    
-                    final_video_path = retry_with_backoff(step5_download_video, max_retries=3, step_name="下载视频")
-                    
-                    icon5, class5 = update_step_status("下载视频", "success", f"保存到: {final_video_path}")
-                    st.markdown(f"""
-                    <div class="{class5}">
-                        <strong>{icon5} 步骤5: 下载视频</strong><br/>
-                        {final_video_path}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    icon6, class6 = update_step_status("处理封面", "running")
-                    st.markdown(f"""
-                    <div class="{class6}">
-                        <strong>{icon6} 步骤6: 处理封面</strong><br/>
-                        <span id="msg6"></span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    def step6_process_cover():
-                        ydl_opts_thumbnail = {
-                            'skip_download': True,
-                            'writethumbnail': True,
-                            'outtmpl': os.path.join(TEMP_DIR, "subtitles", 'cover.%(ext)s'),
-                            'noplaylist': True,
-                        }
-                        
-                        cookies_file_path = None
-                        if YT_COOKIES.strip():
-                            cookies_file_path = os.path.join(TEMP_DIR, "youtube_cookies.txt")
-                        
-                        if cookies_file_path:
-                            ydl_opts_thumbnail['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_opts_thumbnail) as ydl:
-                            ydl.extract_info(workflow_url, download=True)
-                        
-                        input_path = os.path.join(TEMP_DIR, "subtitles", "cover.webp")
-                        output_path = os.path.join(TEMP_DIR, "subtitles", "cover.jpeg")
-                        
-                        if not os.path.exists(input_path):
-                            input_files = list(Path(os.path.join(TEMP_DIR, "subtitles")).glob("cover.*"))
-                            if input_files:
-                                input_path = input_files[0]
-                        
-                        quality = 90
-                        with Image.open(input_path) as img:
-                            if img.mode != 'RGB':
-                                img = img.convert('RGB')
-                            img.save(output_path, 'jpeg', quality=quality)
-
-                        current_size_kb = os.path.getsize(output_path) / 1024
-                        while current_size_kb > 50 and quality > 4:
-                            quality -= 5
-                            img.save(output_path, 'jpeg', quality=quality)
-                            current_size_kb = os.path.getsize(output_path) / 1024
-                            print(f"当前大小: {current_size_kb:.2f} KB, 质量: {quality}")
-                        
-                        return output_path
-                    
-                    cover_file_path = retry_with_backoff(step6_process_cover, max_retries=3, step_name="处理封面")
-                    
-                    icon6, class6 = update_step_status("处理封面", "success", f"保存到: {cover_file_path}")
-                    st.markdown(f"""
-                    <div class="{class6}">
-                        <strong>{icon6} 步骤6: 处理封面</strong><br/>
-                        {cover_file_path}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    st.success("🎉 工作流执行完成！所有文件已准备好")
-                    
-                    st.markdown("---")
-                    st.markdown("## 📁 生成的文件")
-                    st.markdown(f"""
-                    - 字幕: {os.path.join(TEMP_DIR, 'subtitles', 'word_level.vtt')}
-                    - 翻译文本: {txt_file_path}
-                    - 配音: {mp3_file_path}
-                    - 最终视频: {final_video_path}
-                    - 封面: {cover_file_path}
-                    """)
-                    
-                    if auto_upload:
-                        icon7, class7 = update_step_status("上传B站", "running")
-                        st.markdown(f"""
-                        <div class="{class7}">
-                            <strong>{icon7} 步骤7: 上传B站</strong><br/>
-                            <span id="msg7"></span>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        def step7_upload():
-                            credential = Credential(
-                                sessdata=BILI_SESSDATA,
-                                bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26"
-                            )
-                            
-                            vu_meta = VideoMeta(
-                                tid=130,
-                                title=translated_title,
-                                tags=tags_list,
-                                desc=translated_title,
-                                cover=cover_file_path,
-                                no_reprint=True
-                            )
-                            
-                            async def main_upload():
-                                page = VideoUploaderPage(
-                                    path=final_video_path,
-                                    title=translated_title,
-                                    description=translated_title,
-                                )
-                                
-                                uploader = video_uploader.VideoUploader([page], vu_meta, credential, line=video_uploader.Lines.QN)
-                                
-                                @uploader.on("__ALL__")
-                                async def ev(data):
-                                    pass
-                                
-                                await uploader.start()
-                            
-                            asyncio.run(main_upload())
-                            return True
-                        
-                        retry_with_backoff(step7_upload, max_retries=3, step_name="上传B站")
-                        
-                        icon7, class7 = update_step_status("上传B站", "success")
-                        st.markdown(f"""
-                        <div class="{class7}">
-                            <strong>{icon7} 步骤7: 上传B站</strong><br/>
-                            上传成功！
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        st.success("🎉 上传成功！视频已发布到B站！")
-                    else:
-                        st.info("💡 如需上传B站，请在左侧勾选'自动上传到B站'后重新运行工作流")
-            
-            except Exception as e:
-                import traceback
-                st.error(f"❌ 工作流执行失败: {str(e)}")
+    else:
+        # --- 空闲状态，显示输入表单 ---
+        
+        # 如果有上一次的结果，先显示结果
+        if current_status:
+            if current_status.get("error"):
+                st.error(f"❌ 上次任务失败: {current_status.get('error')}")
+            elif not current_status.get("is_running") and current_status.get("results"):
+                st.success("🎉 上次任务执行成功！")
+                results = current_status.get("results", {})
+                st.markdown("### 📁 生成的文件")
                 st.markdown(f"""
-                <div class="step-card step-error">
-                    <strong>错误详情:</strong><br/>
-                    {traceback.format_exc()}
-                </div>
-                """, unsafe_allow_html=True)
+                - 字幕: `{results.get('vtt', 'N/A')}`
+                - 翻译: `{results.get('txt', 'N/A')}`
+                - 配音: `{results.get('mp3', 'N/A')}`
+                - 视频: `{results.get('video', 'N/A')}`
+                - 封面: `{results.get('cover', 'N/A')}`
+                """)
+                st.markdown("---")
+
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            workflow_url = st.text_input("YouTube视频URL", placeholder="https://www.youtube.com/watch?v=...", key="workflow_url_bg")
+        with col2:
+            auto_upload = st.checkbox("自动上传到B站", value=True, help="勾选后完成所有步骤会自动上传", key="auto_upload_bg")
+        
+        if st.button("🚀 启动后台任务", type="primary", use_container_width=True):
+            if not workflow_url:
+                st.error("请输入YouTube视频URL")
+            else:
+                # 收集配置
+                task_config = {
+                    "temp_dir": TEMP_DIR,
+                    "workflow_url": workflow_url,
+                    "auto_upload": auto_upload,
+                    "api_url": API_URL,
+                    "api_key": API_KEY,
+                    "model_name": MODEL_NAME,
+                    "bili_sess": BILI_SESSDATA,
+                    "bili_ak": BILI_ACCESS_KEY_ID, # 虽然代码里暂时没用AK/SK上传，但保留配置
+                    "bili_sk": BILI_ACCESS_KEY_SECRET,
+                    "yt_cookies": YT_COOKIES,
+                    "voice_choice": SELECTED_VOICE,
+                    "max_workers": MAX_WORKERS,
+                    "segment_size": SEGMENT_SIZE
+                }
+                
+                # 启动线程
+                thread = threading.Thread(target=background_workflow_task, args=(task_config,))
+                thread.daemon = True # 设置为守护线程
+                thread.start()
+                
+                st.success("任务已在后台启动！页面即将刷新...")
+                time.sleep(1)
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+
 
 with tab1:
     st.header("1️⬇️ 下载YouTube字幕")
