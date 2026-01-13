@@ -337,14 +337,14 @@ def background_workflow_task(config):
         
         def dl_video():
             dl_base = os.path.join(temp_dir, "subtitles", "downloaded_video")
-        ydl_v_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': video_file,
-            'quiet': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ydl_v_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': video_file,
+                'quiet': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
             }
-        }
             if cookies_file_path: ydl_v_opts['cookiefile'] = cookies_file_path
             
             with yt_dlp.YoutubeDL(ydl_v_opts) as ydl:
@@ -370,15 +370,15 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "处理封面", "running", "优化封面图片...")
         
         def proc_cover():
-        ydl_cov_opts = {
-            'skip_download': True,
-            'writethumbnail': True,
-            'outtmpl': os.path.join(temp_dir, 'cover'),
-            'quiet': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ydl_cov_opts = {
+                'skip_download': True,
+                'writethumbnail': True,
+                'outtmpl': os.path.join(temp_dir, 'cover'),
+                'quiet': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
             }
-        }
             if cookies_file_path: ydl_cov_opts['cookiefile'] = cookies_file_path
             
             with yt_dlp.YoutubeDL(ydl_cov_opts) as ydl:
