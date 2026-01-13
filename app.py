@@ -178,7 +178,10 @@ def background_workflow_task(config):
             'skip_download': True,
             'subtitleslangs': ['en'],
             'quiet': True,
-            'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s')
+            'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
         }
         
         if cookies_file_path:
@@ -212,7 +215,13 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "翻译标题", "running", "正在分析视频信息...")
         
         def trans_title():
-            ydl_info_opts = {'skip_download': True, 'quiet': True}
+            ydl_info_opts = {
+                'skip_download': True, 
+                'quiet': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            }
             if cookies_file_path: ydl_info_opts['cookiefile'] = cookies_file_path
             
             with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
@@ -328,11 +337,14 @@ def background_workflow_task(config):
         
         def dl_video():
             dl_base = os.path.join(temp_dir, "subtitles", "downloaded_video")
-            ydl_v_opts = {
-                'format': 'best',
-                'outtmpl': f'{dl_base}.%(ext)s',
-                'noplaylist': True,
+        ydl_v_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': video_file,
+            'quiet': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
+        }
             if cookies_file_path: ydl_v_opts['cookiefile'] = cookies_file_path
             
             with yt_dlp.YoutubeDL(ydl_v_opts) as ydl:
@@ -358,11 +370,15 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "处理封面", "running", "优化封面图片...")
         
         def proc_cover():
-            ydl_cov_opts = {
-                'skip_download': True, 'writethumbnail': True,
-                'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
-                'noplaylist': True
+        ydl_cov_opts = {
+            'skip_download': True,
+            'writethumbnail': True,
+            'outtmpl': os.path.join(temp_dir, 'cover'),
+            'quiet': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
+        }
             if cookies_file_path: ydl_cov_opts['cookiefile'] = cookies_file_path
             
             with yt_dlp.YoutubeDL(ydl_cov_opts) as ydl:
@@ -1088,7 +1104,10 @@ with tab1:
                         'skip_download': True,
                         'subtitleslangs': ['en'],
                         'quiet': False,
-                        'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s')
+                        'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        }
                     }
                     
                     if cookies_file_path:
@@ -1113,6 +1132,9 @@ with tab1:
                     ydl_info_opts = {
                         'skip_download': True,
                         'quiet': True,
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        }
                     }
                     if cookies_file_path:
                         ydl_info_opts['cookiefile'] = cookies_file_path
@@ -1439,6 +1461,9 @@ with tab1:
                             'format': 'best',
                             'outtmpl': f'{downloaded_video_base_name}.%(ext)s',
                             'noplaylist': True,
+                            'http_headers': {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                            }
                         }
                         
                         if cookies_file_path:
@@ -1523,6 +1548,9 @@ with tab1:
                             'writethumbnail': True,
                             'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
                             'noplaylist': True,
+                            'http_headers': {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                            }
                         }
                         
                         if cookies_file_path:
