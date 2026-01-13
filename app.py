@@ -374,7 +374,7 @@ def background_workflow_task(config):
             ydl_cov_opts = {
                 'skip_download': True,
                 'writethumbnail': True,
-                'outtmpl': os.path.join(temp_dir, 'cover'),
+                'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
                 'quiet': True,
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -394,7 +394,7 @@ def background_workflow_task(config):
                     src_cover = c
                     break
             
-            if not src_cover: return "无封面" # 应该不会发生
+            if not src_cover: raise Exception("未找到封面文件")
             
             out_cover = os.path.join(temp_dir, "subtitles", "cover.jpeg")
             qual = 90
