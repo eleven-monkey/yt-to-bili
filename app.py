@@ -340,7 +340,7 @@ def background_workflow_task(config):
             dl_base = os.path.join(temp_dir, "subtitles", "downloaded_video")
             ydl_v_opts = {
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': video_file,
+                'outtmpl': f'{dl_base}.%(ext)s',
                 'quiet': True,
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
