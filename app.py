@@ -9,6 +9,7 @@ import asyncio
 import glob
 import random
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 import tempfile
