@@ -82,6 +82,7 @@ class WorkflowManager:
     def init_status(temp_dir):
         status = {
             "is_running": True,
+            "stop_requested": False,
             "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "steps": {
                 "下载字幕": {"status": "pending", "message": ""},
@@ -98,6 +99,14 @@ class WorkflowManager:
         }
         WorkflowManager.save_status(temp_dir, status)
         return status
+
+    @staticmethod
+    def request_stop(temp_dir):
+        current_status = WorkflowManager.load_status(temp_dir)
+        if current_status:
+            current_status["stop_requested"] = True
+            current_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 用户请求中止任务...")
+            WorkflowManager.save_status(temp_dir, current_status)
 
     @staticmethod
     def load_status(temp_dir):
@@ -161,11 +170,19 @@ def background_workflow_task(config):
     # 初始化状态
     WorkflowManager.init_status(temp_dir)
     
+    def check_interrupt():
+        """检查是否有中断请求"""
+        s = WorkflowManager.load_status(temp_dir)
+        if s and s.get("stop_requested", False):
+            raise Exception("用户手动中止任务")
+
     try:
+        check_interrupt()
         subtitles_dir = os.path.join(temp_dir, "subtitles")
         os.makedirs(subtitles_dir, exist_ok=True)
         
         # --- 步骤1: 下载字幕 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "下载字幕", "running", "正在下载字幕...")
         
         cookies_file_path = None
@@ -192,8 +209,10 @@ def background_workflow_task(config):
         def retry_op(func, max_retries=3):
             for attempt in range(max_retries):
                 try:
+                    check_interrupt()
                     return func()
                 except Exception as e:
+                    if str(e) == "用户手动中止任务": raise e
                     if attempt == max_retries - 1: raise e
                     time.sleep(2 ** attempt)
 
@@ -213,6 +232,7 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "下载字幕", "success", f"已保存: {os.path.basename(vtt_file_path)}")
         
         # --- 步骤2: 翻译标题 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "翻译标题", "running", "正在分析视频信息...")
         
         def trans_title():
@@ -268,6 +288,7 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "翻译标题", "success", f"标题: {translated_title}")
         
         # --- 步骤3: 翻译字幕 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "翻译字幕", "running", "AI正在翻译中(可能较慢)...")
         # 注意：这里调用全局函数，它会打印日志到stdout，但我们需要它正常运行
         # 我们可以暂时不捕获它的详细进度，或者修改原函数。为保持最小改动，直接调用。
@@ -321,6 +342,7 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "翻译字幕", "success", f"已保存: {os.path.basename(txt_file_path)}")
         
         # --- 步骤4: 转语音 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "转语音", "running", "正在进行TTS转换...")
         
         output_mp3 = os.path.join(subtitles_dir, os.path.splitext(os.path.basename(vtt_file_path))[0] + "_translated.mp3")
@@ -334,6 +356,7 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "转语音", "success", f"已生成: {os.path.basename(mp3_file_path)}")
         
         # --- 步骤5: 下载视频 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "下载视频", "running", "下载并合并视频...")
         
         def dl_video():
@@ -368,6 +391,7 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "下载视频", "success", f"最终视频: {os.path.basename(final_video_path)}")
         
         # --- 步骤6: 处理封面 ---
+        check_interrupt()
         WorkflowManager.update_step(temp_dir, "处理封面", "running", "优化封面图片...")
         
         def proc_cover():
@@ -421,6 +445,7 @@ def background_workflow_task(config):
         
         # --- 步骤7: 上传B站 ---
         if auto_upload:
+            check_interrupt()
             WorkflowManager.update_step(temp_dir, "上传B站", "running", "正在上传到B站...")
             
             credential = Credential(sessdata=config['bili_sess'], bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26")
@@ -448,8 +473,10 @@ def background_workflow_task(config):
 
     except Exception as e:
         import traceback
-        err_msg = f"{str(e)}\n{traceback.format_exc()}"
-        print(f"后台任务出错: {err_msg}")
+        err_msg = f"{str(e)}"
+        if str(e) != "用户手动中止任务":
+            err_msg += f"\n{traceback.format_exc()}"
+            print(f"后台任务出错: {err_msg}")
         WorkflowManager.mark_error(temp_dir, str(e))
 
 def clear_temp_directory():
@@ -977,6 +1004,10 @@ with tab0:
     
     if is_running:
         st.info(f"🔄 任务正在后台运行中... (开始时间: {current_status.get('start_time')})")
+
+        if st.button("🛑 中止任务", type="secondary", key="stop_workflow_btn"):
+             WorkflowManager.request_stop(TEMP_DIR)
+             st.rerun()
         
         # 显示进度
         steps = current_status.get("steps", {})
