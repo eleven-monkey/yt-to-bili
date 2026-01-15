@@ -451,6 +451,10 @@ def background_workflow_task(config):
             check_interrupt()
             WorkflowManager.update_step(temp_dir, "上传B站", "running", "正在上传到B站...")
             
+            print("=" * 50, flush=True)
+            print("开始B站上传流程", flush=True)
+            print("=" * 50, flush=True)
+            
             credential = Credential(sessdata=config['bili_sess'], bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26")
             vu_meta = VideoMeta(
                 tid=130, title=translated_title, tags=tags_list,
@@ -459,55 +463,124 @@ def background_workflow_task(config):
             
             upload_completed = False
             upload_error = None
+            upload_result = None
             
             async def upload_task():
-                nonlocal upload_completed, upload_error
+                nonlocal upload_completed, upload_error, upload_result
                 try:
                     page = VideoUploaderPage(path=final_video_path, title=translated_title, description=translated_title)
                     uploader = video_uploader.VideoUploader([page], vu_meta, credential, line=video_uploader.Lines.QN)
                     
-                    # 添加进度回调
-                    progress_status = {"last_percent": 0}
+                    # 进度状态
+                    total_chunks = 0
+                    uploaded_chunks = 0
+                    last_percent = 0
                     
                     @uploader.on("__ALL__")
                     async def on_all_event(event_data):
                         # 检查中断
                         check_interrupt()
-                        # B站上传进度通常在VIDEO_UPLOAD_DONE事件前
-                        if "percent" in str(event_data):
-                            try:
-                                percent = int(float(str(event_data).split("percent")[1].split("}")[0].strip()))
-                                if percent - progress_status["last_percent"] >= 10:
-                                    WorkflowManager.update_step(temp_dir, "上传B站", "running", f"上传中... {percent}%")
-                                    progress_status["last_percent"] = percent
-                            except:
-                                pass
+                        
+                        # 打印事件名称和关键数据
+                        event_name = event_data.get("name", "UNKNOWN")
+                        data = event_data.get("data", {})
+                        
+                        if event_name == "PREUPLOAD":
+                            print(f"[上传] 事件 PREUPLOAD - 获取上传信息中...", flush=True)
+                        elif event_name == "PREUPLOAD_FAILED":
+                            print(f"[上传] 事件 PREUPLOAD_FAILED - 获取上传信息失败: {data}", flush=True)
+                        elif event_name == "PRE_CHUNK":
+                            total_chunks = data.get("total_chunk_count", 1)
+                            chunk_num = data.get("chunk_number", 1)
+                            print(f"[上传] 事件 PRE_CHUNK - 开始上传分块 {chunk_num}/{total_chunks}", flush=True)
+                        elif event_name == "AFTER_CHUNK":
+                            uploaded_chunks += 1
+                            chunk_num = data.get("chunk_number", 0)
+                            percent = int((uploaded_chunks / total_chunks) * 100) if total_chunks > 0 else 0
+                            if percent - last_percent >= 5:
+                                print(f"[上传] 事件 AFTER_CHUNK - 分块 {chunk_num} 上传完成, 进度 {percent}%", flush=True)
+                                WorkflowManager.update_step(temp_dir, "上传B站", "running", f"上传中... {percent}%")
+                                last_percent = percent
+                        elif event_name == "CHUNK_FAILED":
+                            print(f"[上传] 事件 CHUNK_FAILED - 分块上传失败: {data}", flush=True)
+                        elif event_name == "PRE_PAGE_SUBMIT":
+                            print(f"[上传] 事件 PRE_PAGE_SUBMIT - 准备提交分P", flush=True)
+                        elif event_name == "AFTER_PAGE_SUBMIT":
+                            print(f"[上传] 事件 AFTER_PAGE_SUBMIT - 分P提交完成", flush=True)
+                        elif event_name == "PAGE_SUBMIT_FAILED":
+                            print(f"[上传] 事件 PAGE_SUBMIT_FAILED - 分P提交失败: {data}", flush=True)
+                        elif event_name == "PRE_COVER":
+                            print(f"[上传] 事件 PRE_COVER - 准备上传封面", flush=True)
+                        elif event_name == "AFTER_COVER":
+                            cover_url = data.get("url", "")
+                            print(f"[上传] 事件 AFTER_COVER - 封面上传完成: {cover_url}", flush=True)
+                        elif event_name == "COVER_FAILED":
+                            print(f"[上传] 事件 COVER_FAILED - 封面上传失败: {data}", flush=True)
+                        elif event_name == "PRE_SUBMIT":
+                            print(f"[上传] 事件 PRE_SUBMIT - 准备最终提交", flush=True)
+                        elif event_name == "SUBMIT_FAILED":
+                            print(f"[上传] 事件 SUBMIT_FAILED - 最终提交失败: {data}", flush=True)
+                        elif event_name == "AFTER_SUBMIT":
+                            print(f"[上传] 事件 AFTER_SUBMIT - 最终提交完成", flush=True)
+                            upload_result = data
+                        elif event_name == "COMPLETED":
+                            print(f"[上传] 事件 COMPLETED - 上传全部完成", flush=True)
+                        elif event_name == "ABORTED":
+                            print(f"[上传] 事件 ABORTED - 上传被中止", flush=True)
+                        elif event_name == "FAILED":
+                            print(f"[上传] 事件 FAILED - 上传失败: {data}", flush=True)
+                        else:
+                            print(f"[上传] 事件 {event_name}: {data}", flush=True)
                     
-                    # 设置超时（5分钟）
-                    await asyncio.wait_for(uploader.start(), timeout=300)
+                    print(f"[上传] 开始调用 uploader.start()...", flush=True)
+                    
+                    # 设置超时（10分钟）
+                    await asyncio.wait_for(uploader.start(), timeout=600)
                     upload_completed = True
+                    print(f"[上传] uploader.start() 返回，上传完成", flush=True)
+                    
                 except asyncio.TimeoutError:
-                    upload_error = "上传超时（5分钟），可能是网络问题或B站服务器繁忙"
+                    upload_error = "上传超时（10分钟），可能是网络问题或B站服务器繁忙"
+                    print(f"[上传] 超时错误: {upload_error}", flush=True)
+                except asyncio.CancelledError:
+                    upload_error = "上传被用户取消"
+                    print(f"[上传] 取消错误: {upload_error}", flush=True)
                 except Exception as e:
                     upload_error = str(e)
+                    print(f"[上传] 异常错误: {upload_error}", flush=True)
+                    import traceback
+                    traceback.print_exc()
             
             # 在新事件循环运行
+            print(f"[上传] 创建新的事件循环", flush=True)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(upload_task())
+                print(f"[上传] 事件循环执行完毕", flush=True)
+            except Exception as e:
+                print(f"[上传] 事件循环异常: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
             finally:
                 loop.close()
+                print(f"[上传] 事件循环已关闭", flush=True)
             
             # 检查上传结果
             if upload_error:
                 WorkflowManager.update_step(temp_dir, "上传B站", "error", upload_error)
                 raise Exception(upload_error)
             elif not upload_completed:
-                WorkflowManager.update_step(temp_dir, "上传B站", "error", "上传意外中断")
-                raise Exception("上传意外中断")
+                WorkflowManager.update_step(temp_dir, "上传B站", "error", "上传意外中断（未完成）")
+                raise Exception("上传意外中断（未完成）")
+            
+            if upload_result:
+                bvid = upload_result.get("bvid", "")
+                aid = upload_result.get("aid", "")
+                print(f"[上传] 上传成功! bvid={bvid}, aid={aid}", flush=True)
             
             WorkflowManager.update_step(temp_dir, "上传B站", "success", "上传成功！")
+            print(f"[上传] B站上传步骤完成", flush=True)
         else:
             WorkflowManager.update_step(temp_dir, "上传B站", "success", "跳过上传")
 
