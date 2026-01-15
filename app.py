@@ -105,6 +105,7 @@ class WorkflowManager:
         current_status = WorkflowManager.load_status(temp_dir)
         if current_status:
             current_status["stop_requested"] = True
+            current_status["is_running"] = False  # 立即标记为停止
             current_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 用户请求中止任务...")
             WorkflowManager.save_status(temp_dir, current_status)
 
@@ -214,6 +215,8 @@ def background_workflow_task(config):
                 except Exception as e:
                     if str(e) == "用户手动中止任务": raise e
                     if attempt == max_retries - 1: raise e
+                    # 重试前检查中断
+                    check_interrupt()
                     time.sleep(2 ** attempt)
 
         def dl_sub():
@@ -454,16 +457,55 @@ def background_workflow_task(config):
                 desc=translated_title, cover=cover_path, no_reprint=True
             )
             
+            upload_completed = False
+            upload_error = None
+            
             async def upload_task():
-                page = VideoUploaderPage(path=final_video_path, title=translated_title, description=translated_title)
-                uploader = video_uploader.VideoUploader([page], vu_meta, credential, line=video_uploader.Lines.QN)
-                await uploader.start()
+                nonlocal upload_completed, upload_error
+                try:
+                    page = VideoUploaderPage(path=final_video_path, title=translated_title, description=translated_title)
+                    uploader = video_uploader.VideoUploader([page], vu_meta, credential, line=video_uploader.Lines.QN)
+                    
+                    # 添加进度回调
+                    progress_status = {"last_percent": 0}
+                    
+                    @uploader.on("__ALL__")
+                    async def on_all_event(event_data):
+                        # 检查中断
+                        check_interrupt()
+                        # B站上传进度通常在VIDEO_UPLOAD_DONE事件前
+                        if "percent" in str(event_data):
+                            try:
+                                percent = int(float(str(event_data).split("percent")[1].split("}")[0].strip()))
+                                if percent - progress_status["last_percent"] >= 10:
+                                    WorkflowManager.update_step(temp_dir, "上传B站", "running", f"上传中... {percent}%")
+                                    progress_status["last_percent"] = percent
+                            except:
+                                pass
+                    
+                    # 设置超时（5分钟）
+                    await asyncio.wait_for(uploader.start(), timeout=300)
+                    upload_completed = True
+                except asyncio.TimeoutError:
+                    upload_error = "上传超时（5分钟），可能是网络问题或B站服务器繁忙"
+                except Exception as e:
+                    upload_error = str(e)
             
             # 在新事件循环运行
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(upload_task())
-            loop.close()
+            try:
+                loop.run_until_complete(upload_task())
+            finally:
+                loop.close()
+            
+            # 检查上传结果
+            if upload_error:
+                WorkflowManager.update_step(temp_dir, "上传B站", "error", upload_error)
+                raise Exception(upload_error)
+            elif not upload_completed:
+                WorkflowManager.update_step(temp_dir, "上传B站", "error", "上传意外中断")
+                raise Exception("上传意外中断")
             
             WorkflowManager.update_step(temp_dir, "上传B站", "success", "上传成功！")
         else:
