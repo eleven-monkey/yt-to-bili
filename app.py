@@ -22,25 +22,37 @@ import yt_dlp
 import requests
 
 def run_yt_dlp_subprocess(args, cookies_path=None):
+    # Prefer calling yt-dlp directly to avoid python -m issues (like 'main.py error')
     cmd = [
-        'python', '-m', 'yt_dlp',
+        'yt-dlp',
         '--extractor-args', 'youtube:player_client=default,-web_safari',
         '--remote-components', 'ejs:github',
         '--no-playlist'
     ]
     if cookies_path:
-        cmd.extend(['--cookiefile', cookies_path])
+        cmd.extend(['--cookies', cookies_path])
     
     cmd.extend(args)
     
-    # 在有些环境中，可能需要指定 python 路径或者直接调用 yt-dlp
-    import sys
-    cmd[0] = sys.executable
-
-    # print(f"Debugging yt-dlp call: {cmd}")
+    # Debug info
+    print(f"Executing yt-dlp command: {' '.join(cmd)}")
+    
+    # Use shell=False for security, assuming args are clean
     result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    
     if result.returncode != 0:
-        raise Exception(f"yt-dlp error: {result.stderr}")
+        # Fallback to python -m yt_dlp if binary is not found, but log it
+        if "No such file or directory" in str(result.stderr) or result.returncode == 127:
+             print("yt-dlp binary not found, falling back to python -m yt_dlp")
+             import sys
+             cmd[0] = sys.executable
+             cmd.insert(1, '-m')
+             cmd.insert(2, 'yt_dlp')
+             print(f"Executing fallback command: {' '.join(cmd)}")
+             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+
+        if result.returncode != 0:
+            raise Exception(f"yt-dlp error: {result.stderr}")
     return result.stdout
 
 import edge_tts
