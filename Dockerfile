@@ -3,10 +3,18 @@ FROM python:3.10-slim
 # 更新源并安装系统依赖
 # ffmpeg: 视频处理必须
 # git: 部分依赖可能需要
+# curl, unzip: 安装 deno 需要
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装 Deno (yt-dlp JS 挑战需要)
+RUN curl -fsSL https://deno.land/install.sh | sh
+ENV DENO_INSTALL="/root/.deno"
+ENV PATH="$DENO_INSTALL/bin:$PATH"
 
 # 设置工作目录
 WORKDIR /app

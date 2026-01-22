@@ -20,6 +20,29 @@ from PIL import Image
 import streamlit as st
 import yt_dlp
 import requests
+
+def run_yt_dlp_subprocess(args, cookies_path=None):
+    cmd = [
+        'python', '-m', 'yt_dlp',
+        '--extractor-args', 'youtube:player_client=default,-web_safari',
+        '--remote-components', 'ejs:github',
+        '--no-playlist'
+    ]
+    if cookies_path:
+        cmd.extend(['--cookiefile', cookies_path])
+    
+    cmd.extend(args)
+    
+    # 在有些环境中，可能需要指定 python 路径或者直接调用 yt-dlp
+    import sys
+    cmd[0] = sys.executable
+
+    # print(f"Debugging yt-dlp call: {cmd}")
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    if result.returncode != 0:
+        raise Exception(f"yt-dlp error: {result.stderr}")
+    return result.stdout
+
 import edge_tts
 from bilibili_api import sync, video_uploader, Credential
 from bilibili_api.video_uploader import VideoUploaderPage, VideoMeta
@@ -192,20 +215,6 @@ def background_workflow_task(config):
             with open(cookies_file_path, 'w', encoding='utf-8') as f:
                 f.write(config['yt_cookies'].strip())
         
-        ydl_opts = {
-            'writeautomaticsub': True,
-            'skip_download': True,
-            'subtitleslangs': ['en'],
-            'quiet': True,
-            'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        }
-        
-        if cookies_file_path:
-            ydl_opts['cookiefile'] = cookies_file_path
-        
         # 重试机制
         def retry_op(func, max_retries=3):
             for attempt in range(max_retries):
@@ -220,8 +229,15 @@ def background_workflow_task(config):
                     time.sleep(2 ** attempt)
 
         def dl_sub():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([workflow_url])
+            args = [
+                '--write-auto-sub',
+                '--skip-download',
+                '--sub-langs', 'en',
+                '--quiet',
+                '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+                workflow_url
+            ]
+            run_yt_dlp_subprocess(args, cookies_file_path)
             vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
             if not vtt_files: raise Exception("未找到VTT文件")
             original_file = vtt_files[0]
@@ -239,18 +255,10 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "翻译标题", "running", "正在分析视频信息...")
         
         def trans_title():
-            ydl_info_opts = {
-                'skip_download': True, 
-                'quiet': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            }
-            if cookies_file_path: ydl_info_opts['cookiefile'] = cookies_file_path
-            
-            with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
-                info_dict = ydl.extract_info(workflow_url, download=False)
-                original_title = info_dict.get('title', '')
+            args = ['--dump-json', '--skip-download', '--quiet', workflow_url]
+            stdout = run_yt_dlp_subprocess(args, cookies_file_path)
+            info_dict = json.loads(stdout)
+            original_title = info_dict.get('title', '')
             
             if not original_title: raise Exception("无法获取标题")
             
@@ -364,18 +372,13 @@ def background_workflow_task(config):
         
         def dl_video():
             dl_base = os.path.join(temp_dir, "subtitles", "downloaded_video")
-            ydl_v_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': f'{dl_base}.%(ext)s',
-                'quiet': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            }
-            if cookies_file_path: ydl_v_opts['cookiefile'] = cookies_file_path
-            
-            with yt_dlp.YoutubeDL(ydl_v_opts) as ydl:
-                ydl.extract_info(workflow_url, download=True)
+            args = [
+                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                '-o', f'{dl_base}.%(ext)s',
+                '--quiet',
+                workflow_url
+            ]
+            run_yt_dlp_subprocess(args, cookies_file_path)
             
             dl_files = glob.glob(f"{dl_base}.*")
             if not dl_files: raise Exception("视频文件未找到")
@@ -398,19 +401,14 @@ def background_workflow_task(config):
         WorkflowManager.update_step(temp_dir, "处理封面", "running", "优化封面图片...")
         
         def proc_cover():
-            ydl_cov_opts = {
-                'skip_download': True,
-                'writethumbnail': True,
-                'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
-                'quiet': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            }
-            if cookies_file_path: ydl_cov_opts['cookiefile'] = cookies_file_path
-            
-            with yt_dlp.YoutubeDL(ydl_cov_opts) as ydl:
-                ydl.extract_info(workflow_url, download=True)
+            args = [
+                '--skip-download',
+                '--write-thumbnail',
+                '--quiet',
+                '-o', os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
+                workflow_url
+            ]
+            run_yt_dlp_subprocess(args, cookies_file_path)
             
             # 寻找封面文件
             cover_candidates = list(Path(os.path.join(temp_dir, "subtitles")).glob("cover.*"))
@@ -1246,22 +1244,15 @@ with tab1:
                         with open(cookies_file_path, 'w', encoding='utf-8') as f:
                             f.write(YT_COOKIES.strip())
                     
-                    ydl_opts = {
-                        'writeautomaticsub': True,
-                        'skip_download': True,
-                        'subtitleslangs': ['en'],
-                        'quiet': False,
-                        'outtmpl': os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        }
-                    }
-                    
-                    if cookies_file_path:
-                        ydl_opts['cookiefile'] = cookies_file_path
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        ydl.download([youtube_url])
+                    args = [
+                        '--write-auto-sub',
+                        '--skip-download',
+                        '--sub-langs', 'en',
+                        '--quiet',
+                        '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+                        youtube_url
+                    ]
+                    run_yt_dlp_subprocess(args, cookies_file_path)
                     
                     vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
                     if vtt_files:
@@ -1276,19 +1267,10 @@ with tab1:
                     st.markdown("---")
                     st.info("正在获取并翻译视频标题...")
                     
-                    ydl_info_opts = {
-                        'skip_download': True,
-                        'quiet': True,
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        }
-                    }
-                    if cookies_file_path:
-                        ydl_info_opts['cookiefile'] = cookies_file_path
-                    
-                    with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
-                        info_dict = ydl.extract_info(youtube_url, download=False)
-                        original_title = info_dict.get('title', '')
+                    args = ['--dump-json', '--skip-download', '--quiet', youtube_url]
+                    stdout = run_yt_dlp_subprocess(args, cookies_file_path)
+                    info_dict = json.loads(stdout)
+                    original_title = info_dict.get('title', '')
                     
                     if original_title:
                         st.text(f"原始标题: {original_title}")
@@ -1604,20 +1586,14 @@ with tab1:
                         downloaded_video_base_name = os.path.join(temp_dir, "subtitles", "downloaded_video")
                         new_audio_path = mp3_file
                         
-                        ydl_opts_video_only = {
-                            'format': 'best',
-                            'outtmpl': f'{downloaded_video_base_name}.%(ext)s',
-                            'noplaylist': True,
-                            'http_headers': {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                            }
-                        }
-                        
-                        if cookies_file_path:
-                            ydl_opts_video_only['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_opts_video_only) as ydl:
-                            ydl.extract_info(youtube_url, download=True)
+                        args = [
+                            '-f', 'best',
+                            '-o', f'{downloaded_video_base_name}.%(ext)s',
+                            '--no-playlist',
+                            '--quiet',
+                            youtube_url
+                        ]
+                        run_yt_dlp_subprocess(args, cookies_file_path)
                         
                         downloaded_files = glob.glob(f"{downloaded_video_base_name}.*")
                         if downloaded_files:
@@ -1690,21 +1666,15 @@ with tab1:
                     try:
                         temp_dir = TEMP_DIR
                         
-                        ydl_opts_thumbnail = {
-                            'skip_download': True,
-                            'writethumbnail': True,
-                            'outtmpl': os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
-                            'noplaylist': True,
-                            'http_headers': {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                            }
-                        }
-                        
-                        if cookies_file_path:
-                            ydl_opts_thumbnail['cookiefile'] = cookies_file_path
-                        
-                        with yt_dlp.YoutubeDL(ydl_opts_thumbnail) as ydl:
-                            ydl.extract_info(youtube_url, download=True)
+                        args = [
+                            '--skip-download',
+                            '--write-thumbnail',
+                            '--no-playlist',
+                            '--quiet',
+                            '-o', os.path.join(temp_dir, "subtitles", 'cover.%(ext)s'),
+                            youtube_url
+                        ]
+                        run_yt_dlp_subprocess(args, cookies_file_path)
                         
                         input_path = os.path.join(temp_dir, "subtitles", "cover.webp")
                         output_path = os.path.join(temp_dir, "subtitles", "cover.jpeg")
