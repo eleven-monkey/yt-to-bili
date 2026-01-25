@@ -488,9 +488,18 @@ def background_workflow_task(config):
                     
                     @uploader.on("__ALL__")
                     async def on_all_event(event_data):
+                        nonlocal total_chunks, uploaded_chunks, last_percent
+                        
                         # 检查中断
                         check_interrupt()
                         
+                        # 处理 tuple 类型的 event_data
+                        if isinstance(event_data, tuple):
+                            if len(event_data) > 0:
+                                event_data = event_data[0]
+                            else:
+                                event_data = {}
+                                
                         # 打印事件名称和关键数据
                         event_name = event_data.get("name", "UNKNOWN")
                         data = event_data.get("data", {})
