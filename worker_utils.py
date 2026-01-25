@@ -17,10 +17,11 @@ async def text_to_speech(text, output_file, voice="zh-CN-XiaoxiaoNeural", max_re
             # 添加随机延迟，避免请求过于规律
             if retry_count > 0:
                 delay = base_delay * (2 ** (retry_count - 1)) + (random.random() * 0.5)
-                print(f"第{retry_count}次重试，等待{delay:.2f}秒后继续...")
+                print(f"第{retry_count}次重试，等待{delay:.2f}秒后继续...", flush=True)
                 await asyncio.sleep(delay)
             communicate = edge_tts.Communicate(text, voice)
             await communicate.save(output_file)
+            print(f"[TTS-DEBUG] 成功保存音频: {output_file}", flush=True)
             return  # 成功则退出循环
         except Exception as e:
             error_msg = str(e).lower()
@@ -28,13 +29,13 @@ async def text_to_speech(text, output_file, voice="zh-CN-XiaoxiaoNeural", max_re
             # 检查是否是503错误或其他可重试的错误
             if "503" in error_msg or "timeout" in error_msg or "connection" in error_msg:
                 if retry_count <= max_retries:
-                    print(f"遇到API错误: {e}，准备第{retry_count}次重试...")
+                    print(f"遇到API错误: {e}，准备第{retry_count}次重试...", flush=True)
                 else:
-                    print(f"达到最大重试次数({max_retries})，无法完成转换: {e}")
+                    print(f"达到最大重试次数({max_retries})，无法完成转换: {e}", flush=True)
                     raise  # 达到最大重试次数，抛出异常
             else:
                 # 其他类型的错误直接抛出
-                print(f"遇到非重试类型的错误: {e}")
+                print(f"遇到非重试类型的错误: {e}", flush=True)
                 raise
 
 def run_text_to_speech(text, output_file, voice="zh-CN-XiaoxiaoNeural", max_retries=5):
@@ -73,8 +74,9 @@ def process_segment(task):
         file_name = f"{cleaned_timestamp}.mp3"
         output_file = os.path.join(temp_dir, file_name)
 
-        print(f"进程正在处理段落 {i+1}: {timestamp} - {txt[:30]}...")
+        print(f"进程正在处理段落 {i+1}: {timestamp} - {txt[:30]}... [PID: {os.getpid()}]", flush=True)
         run_text_to_speech(txt, output_file, voice)
+        print(f"段落 {i+1} 处理完成", flush=True)
 
         time_ms = parse_timestamp(f"({timestamp})")
         return i, output_file, time_ms, None
