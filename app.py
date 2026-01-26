@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import re
 import json
 import time
@@ -826,221 +827,62 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
 # TTS 相关函数已移至 worker_utils.py
 
 def process_tts_with_speed_adjustment(txt_file_path, output_mp3_path, subtitles_dir, tts_config=None):
-    """处理TTS转换并进行音频速度调整以避免重叠"""
+    """处理TTS转换并进行音频速度调整 (调用外部脚本以避免主进程卡顿)"""
     cfg_temp_dir = tts_config.get("TEMP_DIR", TEMP_DIR) if tts_config else TEMP_DIR
     cfg_voice = tts_config.get("SELECTED_VOICE", SELECTED_VOICE) if tts_config else SELECTED_VOICE
 
     print("="*50, flush=True)
-    print("开始TTS转换流程", flush=True)
+    print("开始TTS转换流程 (Subprocess Mode)", flush=True)
     print("="*50, flush=True)
 
-    with open(txt_file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    print(f"txt_file_path: {txt_file_path}", flush=True)
-    print(f"文件是否存在: {os.path.exists(txt_file_path)}", flush=True)
-    print(f"content长度: {len(content)} 字符", flush=True)
-
-    # 使用笔记本中的正确正则表达式
-    pattern = r'[\\(（](\d{1,2})?:?(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?[\\)）](.+?)(?=[\\(（](?:\d{1,2})?:?(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?[\\)）]|$)'
-    matches = list(re.finditer(pattern, content, re.DOTALL))
-    print(f"匹配到的segments数量: {len(matches)}", flush=True)
-
-    segments = []
-    for match in matches:
-        timestamp_string = match.group(0)
-        content_text = match.group(5).strip()
-        if content_text:
-            # 提取时间戳部分
-            timestamp_match = re.match(r'[\\(（](.+?)[\\)）]', timestamp_string)
-            if timestamp_match:
-                timestamp = timestamp_match.group(1)
-                segments.append((timestamp, content_text))
-
-    print(f"解析出的segments数量: {len(segments)}", flush=True)
-    if segments:
-        print(f"前3个segments:", flush=True)
-        for i, (ts, txt) in enumerate(segments[:3]):
-            print(f"  {i+1}: ({ts}) {txt[:50]}...", flush=True)
-
-    temp_dir = os.path.dirname(output_mp3_path) if os.path.dirname(output_mp3_path) else cfg_temp_dir
-
-    tasks = []
-    for i, (timestamp, txt) in enumerate(segments):
-        cleaned_timestamp = re.sub(r'[^\w\d]+', '_', timestamp)
-        file_name = f"{cleaned_timestamp}.mp3"
-        output_file = os.path.join(temp_dir, file_name)
-        tasks.append((i, timestamp, txt, temp_dir, cfg_voice))
-
-    with ProcessPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(process_segment, task) for task in tasks]
-
-        audio_files = [None] * len(tasks)
-
-        for future in as_completed(futures):
-            index, output_file, time_ms, error = future.result()
-            if error:
-                print(f"警告: {error}", flush=True)
-            if output_file and os.path.exists(output_file):
-                audio_files[index] = (output_file, time_ms)
-
-        audio_files = [af for af in audio_files if af is not None]
-
-    print(f"调试信息：audio_files 数量: {len(audio_files)}", flush=True)
-    if audio_files:
-        print(f"调试信息：audio_files[0] 结构: {audio_files[0]}", flush=True)
-
-    audio_files.sort(key=lambda x: x[1])
-
-    if audio_files:
-        # 导入必要的库
-        from pydub import AudioSegment
-        import numpy as np
-        from multiprocessing import shared_memory
-
-        # 音频速度调整以避免重叠 (在混音之前进行)
-        print("开始音频速度调整，segments数量:", len(segments), flush=True)
-        print("segments示例:", segments[:2] if segments else '空', flush=True)
-
-        processed_audio_segments = []
-        for i, (audio_file_path, time_ms) in enumerate(audio_files):
-            audio = AudioSegment.from_file(audio_file_path)
-            processed_audio_segments.append((audio_file_path, time_ms, audio))
-
-        # 计算需要调整速度的音频片段
-        speed_adjust_tasks_list = []
-        print(f"开始计算速度调整任务，片段总数: {len(processed_audio_segments)}", flush=True)
-
-        for i, (audio_file_path, time_ms, audio) in enumerate(processed_audio_segments[:-1]):
-            current_len = len(audio)
-            end_time = time_ms + current_len
-
-            # 计算下一个片段的开始时间
-            if i + 1 < len(processed_audio_segments):
-                next_start = processed_audio_segments[i+1][1]
-                if end_time > next_start + 100:  # 如果重叠超过100ms
-                    target = next_start - time_ms - 50  # 留50ms缓冲
-                    if target > 100:  # 目标时长至少100ms
-                        factor = min(current_len / target, 2.0)  # 最多加速2倍
-                        print(f"片段{i}: 当前时间={time_ms}ms, 下一个时间={next_start}ms, 目标时长={target}ms, 实际时长={current_len}ms", flush=True)
-                        print(f"  需要加速: 因子={factor:.2f}", flush=True)
-                        if factor > 1.0:  # 只有需要加速时才调整
-                            # 创建临时文件用于速度调整
-                            temp_speed_file = audio_file_path.replace('.mp3', '_speed.mp3')
-                            audio.export(temp_speed_file, format="mp3")
-                            speed_adjust_tasks_list.append((i, temp_speed_file, target, factor))
-
-        print(f"需要调整速度的音频片段数量: {len(speed_adjust_tasks_list)}", flush=True)
-
-        # 执行速度调整
-        if speed_adjust_tasks_list:
-            print(f"开始处理 {len(speed_adjust_tasks_list)} 个音频速度调整任务...", flush=True)
-
-            with ProcessPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(adjust_audio_speed, task) for task in speed_adjust_tasks_list]
-
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        if result and len(result) >= 3:
-                            i, adjusted_file_path, error = result
-                            if error:
-                                print(f"速度调整失败 {i}: {error}", flush=True)
-                                continue
-                            if adjusted_file_path and os.path.exists(adjusted_file_path):
-                                # 验证调整后的文件确实存在
-                                print(f"速度调整成功 {i}: {adjusted_file_path}", flush=True)
-                    except Exception as e:
-                        print(f"音频速度调整任务失败: {e}", flush=True)
-
-        # 现在进行最终混音 - 使用调整后的音频文件
-        print(f"开始混音 {len(processed_audio_segments)} 个音频片段", flush=True)
-
-        # 导入必要的库
-        from pydub import AudioSegment
-
-        # 为混音准备音频数据 - 检查是否有调整后的文件
-        final_audio_segments = []
-        for audio_file_path, time_ms, original_audio in processed_audio_segments:
-            # 检查是否有对应的调整后文件
-            adjusted_file = audio_file_path.replace('.mp3', '_speed.mp3')
-            if os.path.exists(adjusted_file):
-                # 使用调整后的音频文件
-                try:
-                    adjusted_audio = AudioSegment.from_file(adjusted_file)
-                    final_audio_segments.append((adjusted_file, time_ms, adjusted_audio))
-                    print(f"使用调整后的音频: {os.path.basename(adjusted_file)}, 时长={len(adjusted_audio)}ms", flush=True)
-                except Exception as e:
-                    print(f"加载调整后的音频失败 {adjusted_file}: {e}, 使用原始音频", flush=True)
-                    final_audio_segments.append((audio_file_path, time_ms, original_audio))
-            else:
-                # 使用原始音频
-                final_audio_segments.append((audio_file_path, time_ms, original_audio))
-                print(f"使用原始音频: {os.path.basename(audio_file_path)}, 时长={len(original_audio)}ms", flush=True)
-
-        # 最终混音逻辑优化：使用pydub拼接代替numpy/SharedMemory以降低内存占用
-        print(f"开始混音 {len(final_audio_segments)} 个音频片段 (低内存模式)", flush=True)
+    tts_runner_script = os.path.join(os.getcwd(), "tts_runner.py")
+    
+    cmd = [
+        sys.executable,
+        tts_runner_script,
+        "--input", txt_file_path,
+        "--output", output_mp3_path,
+        "--voice", cfg_voice,
+        "--workers", "4",
+        "--temp", cfg_temp_dir
+    ]
+    
+    print(f"Executing TTS command: {' '.join(cmd)}", flush=True)
+    
+    try:
+        # 使用 subprocess.Popen 实时捕获输出
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            bufsize=1
+        )
         
-        # 创建一个静音片段作为基础，但更好的方式是直接构建列表然后sum
-        # 为了处理时间戳，我们需要计算每段之间的静音间隔
-        
-        combined_audio = AudioSegment.empty()
-        current_pos = 0
-        
-        for i, (audio_file_path, start_ms, audio_segment) in enumerate(final_audio_segments):
-            # 计算需要填充的静音时长
-            if start_ms > current_pos:
-                silence_gap = start_ms - current_pos
-                combined_audio += AudioSegment.silent(duration=silence_gap)
-                current_pos += silence_gap
-            elif start_ms < current_pos:
-                # 如果发生重叠（理论上已通过加速避免，但防止万一）
-                # 回退指针或者修剪上一段（这里简单处理：重叠部分直接叠加或忽略，pydub += 是拼接）
-                # 实际上如果start_ms < current_pos，说明上一段太长了或者这段开始早了
-                # 简单策略：直接接在后面（虽然会不同步），或者裁切重叠
-                # 鉴于之前有加速调整，这里假设误差可接受，直接拼接会推迟后续音频
-                # 为了保持时间戳准确，应该用overlay，但overlay慢且耗内存。
-                # 折中：如果重叠不严重，直接忽略重叠部分的时间差
-                pass
+        # 实时打印子进程输出
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                print(f"[TTS-Process] {line.strip()}", flush=True)
                 
-            combined_audio += audio_segment
-            current_pos += len(audio_segment)
-            
-            # 释放内存：处理完一段可以尝试手动清理（虽然Python有GC）
-            if i % 10 == 0:
-                print(f"已处理 {i+1}/{len(final_audio_segments)} 段", flush=True)
-
-        # 导出最终文件
-        combined_audio.export(output_mp3_path, format="mp3")
-        print(f"最终音频已保存: {output_mp3_path}", flush=True)
-
-        # 清理临时文件
-        for fp, _ in audio_files:
-            if os.path.exists(fp):
-                try:
-                    os.remove(fp)
-                except:
-                    pass
+        returncode = process.poll()
         
-        # 清理加速产生的临时文件
-        for item in final_audio_segments:
-            path = item[0]
-            if path.endswith('_speed.mp3') and os.path.exists(path):
-                 try:
-                    os.remove(path)
-                 except:
-                    pass
-
-        # 清理调整后的临时文件
-        for audio_file_path, _, _ in processed_audio_segments:
-            speed_file = audio_file_path.replace('.mp3', '_speed.mp3')
-            if os.path.exists(speed_file):
-                os.remove(speed_file)
-                print(f"清理临时文件: {os.path.basename(speed_file)}", flush=True)
-
-        return output_mp3_path
-
-    return None
+        if returncode == 0 and os.path.exists(output_mp3_path):
+            print(f"TTS子进程执行成功，输出文件: {output_mp3_path}", flush=True)
+            return output_mp3_path
+        else:
+            print(f"TTS子进程执行失败，返回码: {returncode}", flush=True)
+            return None
+            
+    except Exception as e:
+        print(f"执行TTS子进程时出错: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return None
 
 # parse_timestamp 已移至 worker_utils.py
 
