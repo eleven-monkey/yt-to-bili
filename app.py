@@ -22,6 +22,31 @@ import streamlit as st
 import yt_dlp
 import requests
 
+def update_yt_dlp():
+    """自动更新 yt-dlp 到最新版本"""
+    try:
+        print("正在检查并更新 yt-dlp...")
+        # 使用 pip 更新 yt-dlp
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode == 0:
+            print("yt-dlp 更新成功")
+            # 重新加载 yt_dlp 模块以获取更新后的版本
+            import importlib
+            importlib.reload(yt_dlp)
+            print(f"当前 yt-dlp 版本: {yt_dlp.version.__version__}")
+        else:
+            print(f"yt-dlp 更新失败: {result.stderr}")
+    except Exception as e:
+        print(f"yt-dlp 更新过程出错: {e}")
+
+# 启动时自动更新 yt-dlp
+update_yt_dlp()
+
 def run_yt_dlp_subprocess(args, cookies_path=None):
     # Prefer calling yt-dlp directly to avoid python -m issues (like 'main.py error')
     cmd = [
