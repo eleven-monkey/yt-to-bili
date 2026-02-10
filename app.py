@@ -813,6 +813,9 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             result = response.json()
             translated_content = result['choices'][0]['message']['content']
 
+            # 清理不需要朗读的字符 / Clean characters not to be read
+            translated_content = translated_content.replace('&gt;', '').replace('>>', '').replace('& trash;', '').replace('[音乐]', '').replace('[笑声]', '')
+
             print(f"调试信息：分段 {batch_index} 翻译完成，返回内容长度: {len(translated_content)} 字符")
             print(f"翻译内容预览: {translated_content[:200]}...")
             return translated_content
