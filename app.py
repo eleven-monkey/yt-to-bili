@@ -639,6 +639,166 @@ def background_workflow_task(config):
             print(f"后台任务出错: {err_msg}")
         WorkflowManager.mark_error(temp_dir, str(e))
 
+# --- 批量工作流相关 ---
+BATCH_STATUS_FILE = "batch_status.json"
+
+class BatchWorkflowManager:
+    @staticmethod
+    def get_batch_dir(base_dir):
+        return os.path.join(base_dir, "batch_workspace")
+
+    @staticmethod
+    def get_status_file_path(base_dir):
+        batch_dir = BatchWorkflowManager.get_batch_dir(base_dir)
+        return os.path.join(batch_dir, BATCH_STATUS_FILE)
+
+    @staticmethod
+    def init_status(base_dir, urls):
+        batch_dir = BatchWorkflowManager.get_batch_dir(base_dir)
+        os.makedirs(batch_dir, exist_ok=True)
+        video_results = []
+        for i, url in enumerate(urls):
+            video_results.append({
+                "index": i,
+                "url": url,
+                "status": "pending",
+                "message": "等待中"
+            })
+        status = {
+            "is_running": True,
+            "stop_requested": False,
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_videos": len(urls),
+            "current_index": -1,
+            "video_results": video_results,
+            "error": None,
+            "logs": []
+        }
+        BatchWorkflowManager.save_status(base_dir, status)
+        return status
+
+    @staticmethod
+    def request_stop(base_dir):
+        current = BatchWorkflowManager.load_status(base_dir)
+        if current:
+            current["stop_requested"] = True
+            current["is_running"] = False
+            current["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 用户请求中止批量任务...")
+            BatchWorkflowManager.save_status(base_dir, current)
+
+    @staticmethod
+    def load_status(base_dir):
+        file_path = BatchWorkflowManager.get_status_file_path(base_dir)
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def save_status(base_dir, status):
+        file_path = BatchWorkflowManager.get_status_file_path(base_dir)
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(status, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存批量状态失败: {e}")
+
+    @staticmethod
+    def update_video(base_dir, index, status_code, message=""):
+        current = BatchWorkflowManager.load_status(base_dir)
+        if current and 0 <= index < len(current["video_results"]):
+            current["video_results"][index]["status"] = status_code
+            current["video_results"][index]["message"] = message
+            current["current_index"] = index
+            current["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 视频 {index+1}: {status_code} - {message}")
+            BatchWorkflowManager.save_status(base_dir, current)
+
+    @staticmethod
+    def mark_completed(base_dir):
+        current = BatchWorkflowManager.load_status(base_dir)
+        if current:
+            current["is_running"] = False
+            current["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 批量任务全部完成")
+            BatchWorkflowManager.save_status(base_dir, current)
+
+    @staticmethod
+    def mark_error(base_dir, error_msg):
+        current = BatchWorkflowManager.load_status(base_dir)
+        if current:
+            current["is_running"] = False
+            current["error"] = error_msg
+            BatchWorkflowManager.save_status(base_dir, current)
+
+
+def background_batch_workflow_task(batch_config):
+    """
+    后台运行的批量工作流主函数
+    batch_config: 包含 urls 列表和所有必要参数的字典
+    """
+    base_dir = batch_config['base_dir']
+    urls = batch_config['urls']
+    auto_upload = batch_config['auto_upload']
+
+    # 初始化批量状态
+    BatchWorkflowManager.init_status(base_dir, urls)
+    batch_dir = BatchWorkflowManager.get_batch_dir(base_dir)
+
+    try:
+        for i, url in enumerate(urls):
+            # 检查中止
+            bs = BatchWorkflowManager.load_status(base_dir)
+            if bs and bs.get("stop_requested", False):
+                BatchWorkflowManager.update_video(base_dir, i, "error", "用户中止")
+                break
+
+            BatchWorkflowManager.update_video(base_dir, i, "running", "正在处理...")
+
+            # 为每个视频创建独立临时目录
+            video_temp_dir = os.path.join(batch_dir, f"video_{i}")
+            os.makedirs(video_temp_dir, exist_ok=True)
+
+            # 构建单视频配置（复用 background_workflow_task）
+            single_config = {
+                "temp_dir": video_temp_dir,
+                "workflow_url": url.strip(),
+                "auto_upload": auto_upload,
+                "api_url": batch_config['api_url'],
+                "api_key": batch_config['api_key'],
+                "model_name": batch_config['model_name'],
+                "bili_sess": batch_config['bili_sess'],
+                "bili_ak": batch_config.get('bili_ak', ''),
+                "bili_sk": batch_config.get('bili_sk', ''),
+                "yt_cookies": batch_config.get('yt_cookies', ''),
+                "voice_choice": batch_config['voice_choice'],
+                "max_workers": batch_config['max_workers'],
+                "segment_size": batch_config['segment_size']
+            }
+
+            try:
+                background_workflow_task(single_config)
+                # 检查单视频的执行结果
+                single_status = WorkflowManager.load_status(video_temp_dir)
+                if single_status and single_status.get("error"):
+                    BatchWorkflowManager.update_video(base_dir, i, "error", single_status["error"])
+                else:
+                    BatchWorkflowManager.update_video(base_dir, i, "success", "处理完成")
+            except Exception as e:
+                BatchWorkflowManager.update_video(base_dir, i, "error", str(e))
+                print(f"批量任务 - 视频 {i+1} 出错: {e}")
+                # 继续处理下一个视频，不中断整个批量任务
+                continue
+
+        BatchWorkflowManager.mark_completed(base_dir)
+
+    except Exception as e:
+        import traceback
+        print(f"批量任务出错: {e}\n{traceback.format_exc()}")
+        BatchWorkflowManager.mark_error(base_dir, str(e))
+
 def clear_temp_directory():
     """清空temp目录下的所有内容"""
     import shutil
@@ -954,8 +1114,9 @@ if not os.path.exists(TEMP_DIR):
 
 temp_dir = None
 
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab0, tab8, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "0️🚀 一键工作流",
+        "📦 批量工作流",
         "1️⬇️ 下载字幕", 
         "2️⚙️ 翻译字幕", 
         "3️🗣️ 转语音", 
@@ -1105,6 +1266,178 @@ with tab0:
                 thread.start()
                 
                 st.success("任务已在后台启动！页面即将刷新...")
+                time.sleep(1)
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+
+with tab8:
+    st.markdown("""
+    <style>
+    .batch-container {
+        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: white;
+    }
+    .video-card {
+        background: rgba(255,255,255,0.1);
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .video-success {
+        background: rgba(40,167,69,0.3);
+        border-color: #28a745;
+    }
+    .video-error {
+        background: rgba(220,53,69,0.3);
+        border-color: #dc3545;
+    }
+    .video-running {
+        background: rgba(255,193,7,0.3);
+        border-color: #ffc107;
+    }
+    </style>
+    <div class="batch-container">
+        <h1 style="text-align:center; margin-bottom:1rem;">📦 批量工作流</h1>
+        <p style="text-align:center; opacity:0.9;">输入多个YouTube链接，自动逐个完成翻译、配音、下载和上传</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # 检查批量任务状态
+    batch_status = BatchWorkflowManager.load_status(TEMP_DIR)
+    batch_is_running = batch_status and batch_status.get("is_running", False)
+
+    if batch_is_running:
+        st.info(f"🔄 批量任务正在后台运行中... (开始时间: {batch_status.get('start_time')})")
+
+        if st.button("🛑 中止批量任务", type="secondary", key="stop_batch_btn"):
+            BatchWorkflowManager.request_stop(TEMP_DIR)
+            st.rerun()
+
+        # 总体进度
+        total = batch_status.get("total_videos", 0)
+        current_idx = batch_status.get("current_index", -1)
+        done_count = sum(1 for v in batch_status.get("video_results", []) if v["status"] in ("success", "error"))
+        st.progress(done_count / total if total > 0 else 0, text=f"总进度: {done_count}/{total}")
+
+        # 每个视频的状态卡片
+        for vr in batch_status.get("video_results", []):
+            vs = vr.get("status", "pending")
+            vm = vr.get("message", "")
+            vurl = vr.get("url", "")
+            vidx = vr.get("index", 0)
+
+            icon = "⏳"
+            css = "video-card"
+            if vs == "running":
+                icon = "🔄"
+                css = "video-card video-running"
+            elif vs == "success":
+                icon = "✅"
+                css = "video-card video-success"
+            elif vs == "error":
+                icon = "❌"
+                css = "video-card video-error"
+
+            st.markdown(f"""
+            <div class="{css}">
+                <strong>{icon} 视频 {vidx+1}</strong> &nbsp; <code style="color:#ddd;">{vurl[:60]}{'...' if len(vurl)>60 else ''}</code><br/>
+                <span style="opacity:0.8; font-size:0.9em">{vm}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 日志
+        with st.expander("查看详细日志", expanded=False):
+            logs = batch_status.get("logs", [])
+            for log in logs[-15:]:
+                st.text(log)
+
+        # 如果当前有正在处理的视频，显示其子步骤
+        if 0 <= current_idx < total:
+            current_vr = batch_status["video_results"][current_idx]
+            if current_vr["status"] == "running":
+                batch_dir = BatchWorkflowManager.get_batch_dir(TEMP_DIR)
+                video_temp = os.path.join(batch_dir, f"video_{current_idx}")
+                single_st = WorkflowManager.load_status(video_temp)
+                if single_st:
+                    with st.expander(f"📋 视频 {current_idx+1} 详细步骤", expanded=True):
+                        for sn, si in single_st.get("steps", {}).items():
+                            s_status = si.get("status", "pending")
+                            s_msg = si.get("message", "")
+                            s_icon = {"pending": "⏳", "running": "🔄", "success": "✅", "error": "❌"}.get(s_status, "⏳")
+                            st.text(f"  {s_icon} {sn}: {s_msg}")
+
+        # 自动刷新
+        time.sleep(3)
+        try:
+            st.rerun()
+        except AttributeError:
+            st.experimental_rerun()
+
+    else:
+        # --- 空闲状态 ---
+
+        # 显示上一次批量任务结果
+        if batch_status:
+            if batch_status.get("error"):
+                st.error(f"❌ 上次批量任务失败: {batch_status.get('error')}")
+            elif not batch_status.get("is_running"):
+                st.success("🎉 上次批量任务已完成！")
+                results_list = batch_status.get("video_results", [])
+                success_count = sum(1 for v in results_list if v["status"] == "success")
+                error_count = sum(1 for v in results_list if v["status"] == "error")
+                st.markdown(f"**结果**: ✅ 成功 {success_count} 个 &nbsp; ❌ 失败 {error_count} 个")
+                for vr in results_list:
+                    icon = "✅" if vr["status"] == "success" else "❌"
+                    st.text(f"  {icon} {vr['url'][:80]} — {vr['message']}")
+                st.markdown("---")
+
+        batch_urls = st.text_area(
+            "YouTube视频URL（每行一个）",
+            placeholder="https://www.youtube.com/watch?v=xxx\nhttps://www.youtube.com/watch?v=yyy\nhttps://www.youtube.com/watch?v=zzz",
+            height=200,
+            key="batch_urls_input"
+        )
+
+        bcol1, bcol2 = st.columns([2, 1])
+        with bcol2:
+            batch_auto_upload = st.checkbox("自动上传到B站", value=True, help="每个视频完成后自动上传", key="batch_auto_upload")
+
+        if st.button("🚀 启动批量任务", type="primary", use_container_width=True, key="start_batch_btn"):
+            # 解析URL
+            raw_urls = [u.strip() for u in batch_urls.strip().splitlines() if u.strip()]
+            if not raw_urls:
+                st.error("请输入至少一个YouTube视频URL")
+            else:
+                st.info(f"即将处理 {len(raw_urls)} 个视频")
+
+                batch_task_config = {
+                    "base_dir": TEMP_DIR,
+                    "urls": raw_urls,
+                    "auto_upload": batch_auto_upload,
+                    "api_url": API_URL,
+                    "api_key": API_KEY,
+                    "model_name": MODEL_NAME,
+                    "bili_sess": BILI_SESSDATA,
+                    "bili_ak": BILI_ACCESS_KEY_ID,
+                    "bili_sk": BILI_ACCESS_KEY_SECRET,
+                    "yt_cookies": YT_COOKIES,
+                    "voice_choice": SELECTED_VOICE,
+                    "max_workers": MAX_WORKERS,
+                    "segment_size": SEGMENT_SIZE
+                }
+
+                thread = threading.Thread(target=background_batch_workflow_task, args=(batch_task_config,))
+                thread.daemon = True
+                thread.start()
+
+                st.success("批量任务已在后台启动！页面即将刷新...")
                 time.sleep(1)
                 try:
                     st.rerun()
