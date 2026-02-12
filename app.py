@@ -44,8 +44,11 @@ def update_yt_dlp():
     except Exception as e:
         print(f"yt-dlp 更新过程出错: {e}")
 
-# 启动时自动更新 yt-dlp
-update_yt_dlp()
+# 启动时自动更新 yt-dlp（仅在进程首次启动时执行一次）
+_yt_dlp_updated = globals().get('_yt_dlp_updated', False)
+if not _yt_dlp_updated:
+    update_yt_dlp()
+    _yt_dlp_updated = True
 
 def run_yt_dlp_subprocess(args, cookies_path=None):
     # Prefer calling yt-dlp directly to avoid python -m issues (like 'main.py error')
@@ -668,10 +671,12 @@ class BatchWorkflowManager:
             "is_running": True,
             "stop_requested": False,
             "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "start_timestamp": datetime.now().isoformat(),
             "total_videos": len(urls),
             "current_index": -1,
             "video_results": video_results,
             "error": None,
+            "elapsed_time": "",
             "logs": []
         }
         BatchWorkflowManager.save_status(base_dir, status)
@@ -718,11 +723,31 @@ class BatchWorkflowManager:
             BatchWorkflowManager.save_status(base_dir, current)
 
     @staticmethod
+    def _calc_elapsed(current):
+        """根据 start_timestamp 计算已用时间的可读字符串"""
+        try:
+            start = datetime.fromisoformat(current.get("start_timestamp", ""))
+            delta = datetime.now() - start
+            total_secs = int(delta.total_seconds())
+            hours, remainder = divmod(total_secs, 3600)
+            mins, secs = divmod(remainder, 60)
+            if hours > 0:
+                return f"{hours}小时{mins}分{secs}秒"
+            elif mins > 0:
+                return f"{mins}分{secs}秒"
+            else:
+                return f"{secs}秒"
+        except Exception:
+            return ""
+
+    @staticmethod
     def mark_completed(base_dir):
         current = BatchWorkflowManager.load_status(base_dir)
         if current:
             current["is_running"] = False
-            current["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 批量任务全部完成")
+            elapsed = BatchWorkflowManager._calc_elapsed(current)
+            current["elapsed_time"] = elapsed
+            current["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] 批量任务全部完成，总用时: {elapsed}")
             BatchWorkflowManager.save_status(base_dir, current)
 
     @staticmethod
@@ -731,6 +756,7 @@ class BatchWorkflowManager:
         if current:
             current["is_running"] = False
             current["error"] = error_msg
+            current["elapsed_time"] = BatchWorkflowManager._calc_elapsed(current)
             BatchWorkflowManager.save_status(base_dir, current)
 
 
@@ -740,22 +766,27 @@ def background_batch_workflow_task(batch_config):
     batch_config: 包含 urls 列表和所有必要参数的字典
     """
     base_dir = batch_config['base_dir']
-    urls = batch_config['urls']
+    items = batch_config['items']  # [{"url": ..., "voice": ...}, ...]
     auto_upload = batch_config['auto_upload']
+    default_voice = batch_config.get('voice_choice', 'zh-CN-YunjianNeural')
 
-    # 初始化批量状态
+    # 提取所有 URL 用于初始化状态
+    urls = [item['url'] for item in items]
     BatchWorkflowManager.init_status(base_dir, urls)
     batch_dir = BatchWorkflowManager.get_batch_dir(base_dir)
 
     try:
-        for i, url in enumerate(urls):
+        for i, item in enumerate(items):
+            url = item['url']
+            voice = item.get('voice', default_voice)
+
             # 检查中止
             bs = BatchWorkflowManager.load_status(base_dir)
             if bs and bs.get("stop_requested", False):
                 BatchWorkflowManager.update_video(base_dir, i, "error", "用户中止")
                 break
 
-            BatchWorkflowManager.update_video(base_dir, i, "running", "正在处理...")
+            BatchWorkflowManager.update_video(base_dir, i, "running", f"正在处理... (配音: {voice})")
 
             # 为每个视频创建独立临时目录
             video_temp_dir = os.path.join(batch_dir, f"video_{i}")
@@ -773,7 +804,7 @@ def background_batch_workflow_task(batch_config):
                 "bili_ak": batch_config.get('bili_ak', ''),
                 "bili_sk": batch_config.get('bili_sk', ''),
                 "yt_cookies": batch_config.get('yt_cookies', ''),
-                "voice_choice": batch_config['voice_choice'],
+                "voice_choice": voice,
                 "max_workers": batch_config['max_workers'],
                 "segment_size": batch_config['segment_size']
             }
@@ -1096,6 +1127,13 @@ BILI_ACCESS_KEY_SECRET = st.sidebar.text_input("B站Access Key Secret", type="pa
 YT_COOKIES = st.sidebar.text_area("YouTube Cookies (可选)", value=env_config.get("YT_COOKIES", ""), help="YouTube cookies（用于访问需要登录的视频）", height=100, key="yt_cookies")
 
 VOICE_CHOICES = ["zh-CN-XiaoxiaoNeural", "zh-CN-YunjianNeural", "zh-CN-YunxiNeural"]
+# 中文别名映射（用于批量工作流的配音标签）
+VOICE_ALIAS_MAP = {
+    "女声-晓晓": "zh-CN-XiaoxiaoNeural",
+    "男声-云健": "zh-CN-YunjianNeural",
+    "男声-云希": "zh-CN-YunxiNeural",
+}
+VOICE_ALIAS_REVERSE = {v: k for k, v in VOICE_ALIAS_MAP.items()}
 SELECTED_VOICE = st.sidebar.selectbox("TTS语音角色", options=VOICE_CHOICES, index=1, key="selected_voice")
 
 MAX_WORKERS = st.sidebar.slider("翻译并发数", min_value=1, max_value=20, value=10, help="同时翻译的段落数量")
@@ -1392,34 +1430,75 @@ with tab8:
                 results_list = batch_status.get("video_results", [])
                 success_count = sum(1 for v in results_list if v["status"] == "success")
                 error_count = sum(1 for v in results_list if v["status"] == "error")
-                st.markdown(f"**结果**: ✅ 成功 {success_count} 个 &nbsp; ❌ 失败 {error_count} 个")
+                elapsed = batch_status.get('elapsed_time', '')
+                elapsed_text = f" &nbsp; ⏱️ 用时 {elapsed}" if elapsed else ""
+                st.markdown(f"**结果**: ✅ 成功 {success_count} 个 &nbsp; ❌ 失败 {error_count} 个{elapsed_text}")
                 for vr in results_list:
                     icon = "✅" if vr["status"] == "success" else "❌"
                     st.text(f"  {icon} {vr['url'][:80]} — {vr['message']}")
                 st.markdown("---")
 
+        # 初始化 session_state
+        if "batch_urls_val" not in st.session_state:
+            st.session_state["batch_urls_val"] = ""
+
         batch_urls = st.text_area(
-            "YouTube视频URL（每行一个）",
-            placeholder="https://www.youtube.com/watch?v=xxx\nhttps://www.youtube.com/watch?v=yyy\nhttps://www.youtube.com/watch?v=zzz",
+            "YouTube视频URL（每行一个，可用 | 指定配音角色）",
+            placeholder="https://www.youtube.com/watch?v=xxx | 女声-晓晓\nhttps://www.youtube.com/watch?v=yyy | 男声-云健\nhttps://www.youtube.com/watch?v=zzz",
             height=200,
-            key="batch_urls_input"
+            key="batch_urls_input",
+            help="格式: URL | 配音角色（可选）。不指定角色则使用侧边栏默认角色。"
         )
+
+        # 添加配音标签按钮
+        tag_col1, tag_col2 = st.columns([1, 3])
+        with tag_col1:
+            if st.button("🏷️ 添加配音标签", key="add_voice_tag_btn", help="为所有未标记角色的URL添加当前侧边栏选中的配音角色标签"):
+                current_alias = VOICE_ALIAS_REVERSE.get(SELECTED_VOICE, SELECTED_VOICE)
+                lines = batch_urls.strip().splitlines() if batch_urls.strip() else []
+                new_lines = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "|" in line:
+                        # 已有标签，不覆盖
+                        new_lines.append(line)
+                    else:
+                        new_lines.append(f"{line} | {current_alias}")
+                st.session_state["batch_urls_input"] = "\n".join(new_lines)
+                st.rerun()
+        with tag_col2:
+            alias_list = "、".join(VOICE_ALIAS_MAP.keys())
+            st.caption(f"可用角色: {alias_list}")
 
         bcol1, bcol2 = st.columns([2, 1])
         with bcol2:
             batch_auto_upload = st.checkbox("自动上传到B站", value=True, help="每个视频完成后自动上传", key="batch_auto_upload")
 
         if st.button("🚀 启动批量任务", type="primary", use_container_width=True, key="start_batch_btn"):
-            # 解析URL
-            raw_urls = [u.strip() for u in batch_urls.strip().splitlines() if u.strip()]
-            if not raw_urls:
+            # 解析URL和配音角色
+            raw_lines = [u.strip() for u in batch_urls.strip().splitlines() if u.strip()]
+            if not raw_lines:
                 st.error("请输入至少一个YouTube视频URL")
             else:
-                st.info(f"即将处理 {len(raw_urls)} 个视频")
+                parsed_items = []
+                for line in raw_lines:
+                    if "|" in line:
+                        parts = line.split("|", 1)
+                        url_part = parts[0].strip()
+                        voice_tag = parts[1].strip()
+                        # 将中文别名转换为实际语音ID
+                        voice_id = VOICE_ALIAS_MAP.get(voice_tag, voice_tag)
+                        parsed_items.append({"url": url_part, "voice": voice_id})
+                    else:
+                        parsed_items.append({"url": line.strip(), "voice": SELECTED_VOICE})
+
+                st.info(f"即将处理 {len(parsed_items)} 个视频")
 
                 batch_task_config = {
                     "base_dir": TEMP_DIR,
-                    "urls": raw_urls,
+                    "items": parsed_items,
                     "auto_upload": batch_auto_upload,
                     "api_url": API_URL,
                     "api_key": API_KEY,
