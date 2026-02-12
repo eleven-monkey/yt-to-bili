@@ -1442,6 +1442,24 @@ with tab8:
         if "batch_urls_val" not in st.session_state:
             st.session_state["batch_urls_val"] = ""
 
+        # 处理"添加配音标签"按钮（必须在 text_area 渲染之前修改 session_state）
+        if st.session_state.get("_apply_voice_tag", False):
+            st.session_state["_apply_voice_tag"] = False
+            current_text = st.session_state.get("batch_urls_input", "")
+            tag_voice = st.session_state.get("_tag_voice_alias", "")
+            lines = current_text.strip().splitlines() if current_text.strip() else []
+            new_lines = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" in line:
+                    # 已有标签，不覆盖
+                    new_lines.append(line)
+                else:
+                    new_lines.append(f"{line} | {tag_voice}")
+            st.session_state["batch_urls_input"] = "\n".join(new_lines)
+
         batch_urls = st.text_area(
             "YouTube视频URL（每行一个，可用 | 指定配音角色）",
             placeholder="https://www.youtube.com/watch?v=xxx | 女声-晓晓\nhttps://www.youtube.com/watch?v=yyy | 男声-云健\nhttps://www.youtube.com/watch?v=zzz",
@@ -1454,19 +1472,8 @@ with tab8:
         tag_col1, tag_col2 = st.columns([1, 3])
         with tag_col1:
             if st.button("🏷️ 添加配音标签", key="add_voice_tag_btn", help="为所有未标记角色的URL添加当前侧边栏选中的配音角色标签"):
-                current_alias = VOICE_ALIAS_REVERSE.get(SELECTED_VOICE, SELECTED_VOICE)
-                lines = batch_urls.strip().splitlines() if batch_urls.strip() else []
-                new_lines = []
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if "|" in line:
-                        # 已有标签，不覆盖
-                        new_lines.append(line)
-                    else:
-                        new_lines.append(f"{line} | {current_alias}")
-                st.session_state["batch_urls_input"] = "\n".join(new_lines)
+                st.session_state["_apply_voice_tag"] = True
+                st.session_state["_tag_voice_alias"] = VOICE_ALIAS_REVERSE.get(SELECTED_VOICE, SELECTED_VOICE)
                 st.rerun()
         with tag_col2:
             alias_list = "、".join(VOICE_ALIAS_MAP.keys())
