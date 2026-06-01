@@ -95,7 +95,7 @@ def adjust_audio_speed(task):
     try:
         subprocess.run([
             'ffmpeg', '-y', '-i', temp_output,
-            '-filter:a', f'atempo={speed_factor}',
+            '-filter:a', f'lowpass=f=8000,atempo={speed_factor}',
             temp_output_processed
         ], check=True, capture_output=True)
         # Replace original file with processed one
