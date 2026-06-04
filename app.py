@@ -397,6 +397,18 @@ def background_workflow_task(config):
         # 让我们尝试一种 Pythonic 的方法：动态修改全局变量上下文？不，太黑魔法。
         # 我将修改 `translate_subtitles_from_vtt` 接受可选的 api_config 参数。
         
+        # Define log callback to update the workflow step
+        def bg_log_callback(msg):
+            # Print to stdout/console
+            print(msg)
+            # Find the last line to update status message briefly
+            lines = [l.strip() for l in msg.split('\n') if l.strip()]
+            if lines:
+                brief = lines[-1]
+                # Filter out the long printed translated subtitle content to keep status updates clean
+                if not (brief.startswith("(") and ")" in brief) and not brief.startswith("---"):
+                    WorkflowManager.update_step(temp_dir, "翻译字幕", "running", brief)
+
         txt_file_path = translate_subtitles_from_vtt(vtt_file_path, api_config={
             "API_URL": config['api_url'],
             "API_KEY": config['api_key'],
@@ -409,7 +421,8 @@ def background_workflow_task(config):
             "local_gpu_layers": config.get('local_gpu_layers', -1),
             "local_n_ctx": config.get('local_n_ctx', 8192),
             "local_chunk_size": config.get('local_chunk_size', 10),
-            "local_terminology": config.get('local_terminology', '')
+            "local_terminology": config.get('local_terminology', ''),
+            "log_callback": bg_log_callback
         })
         
         WorkflowManager.update_step(temp_dir, "翻译字幕", "success", f"已保存: {os.path.basename(txt_file_path)}")
@@ -990,7 +1003,8 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             f.write(seg + "\n\n")
 
     if cfg_use_local:
-        model_path = download_model(repo_id=cfg_local_repo, filename=cfg_local_file)
+        cfg_log_callback = api_config.get("log_callback", None) if api_config else None
+        model_path = download_model(repo_id=cfg_local_repo, filename=cfg_local_file, log_callback=cfg_log_callback)
         term_dict = {}
         if cfg_local_term:
             for line in cfg_local_term.strip().splitlines():
@@ -1005,7 +1019,8 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             chunk_size=cfg_local_chunk_size,
             terminology=term_dict,
             n_ctx=cfg_local_ctx,
-            n_gpu_layers=cfg_local_gpu
+            n_gpu_layers=cfg_local_gpu,
+            log_callback=cfg_log_callback
         )
         return final_output_file
 
