@@ -22,7 +22,7 @@ import streamlit as st
 import yt_dlp
 import requests
 
-from src.local_translator import check_dependencies, download_model, translate_subtitle_file
+from src.local_translator import check_dependencies, download_model, translate_subtitle_file, translate_title_and_tags_local
 
 def update_yt_dlp():
     """自动更新 yt-dlp 到最新版本"""
@@ -305,31 +305,43 @@ def background_workflow_task(config):
             
             if not original_title: raise Exception("无法获取标题")
             
-            # 调用API翻译
-            headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
-            
-            # 标题翻译
-            payload = {
-                "model": config['model_name'],
-                "messages": [
-                    {"role": "system", "content": "你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"},
-                    {"role": "user", "content": original_title}
-                ]
-            }
-            resp = requests.post(config['api_url'], json=payload, headers=headers, timeout=60)
-            translated_title = resp.json()['choices'][0]['message']['content'].replace('**', '').strip()
-            
-            # 标签生成
-            tags_payload = {
-                "model": config['model_name'],
-                "messages": [
-                    {"role": "system", "content": "你是一个专业的B站运营助手"},
-                    {"role": "user", "content": f"根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：\n标题：{translated_title}\n只输出标签，不要其他内容。"}
-                ]
-            }
-            tags_resp = requests.post(config['api_url'], json=tags_payload, headers=headers, timeout=60)
-            tags_str = tags_resp.json()['choices'][0]['message']['content']
-            tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
+            if config.get('use_local_model', False):
+                model_path = download_model(
+                    repo_id=config['local_model_repo'],
+                    filename=config['local_model_file']
+                )
+                translated_title, tags_list = translate_title_and_tags_local(
+                    original_title=original_title,
+                    model_path=model_path,
+                    n_ctx=config['local_n_ctx'],
+                    n_gpu_layers=config['local_gpu_layers']
+                )
+            else:
+                # 调用API翻译
+                headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
+                
+                # 标题翻译
+                payload = {
+                    "model": config['model_name'],
+                    "messages": [
+                        {"role": "system", "content": "你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"},
+                        {"role": "user", "content": original_title}
+                    ]
+                }
+                resp = requests.post(config['api_url'], json=payload, headers=headers, timeout=60)
+                translated_title = resp.json()['choices'][0]['message']['content'].replace('**', '').strip()
+                
+                # 标签生成
+                tags_payload = {
+                    "model": config['model_name'],
+                    "messages": [
+                        {"role": "system", "content": "你是一个专业的B站运营助手"},
+                        {"role": "user", "content": f"根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：\n标题：{translated_title}\n只输出标签，不要其他内容。"}
+                    ]
+                }
+                tags_resp = requests.post(config['api_url'], json=tags_payload, headers=headers, timeout=60)
+                tags_str = tags_resp.json()['choices'][0]['message']['content']
+                tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
             
             # 保存上传配置
             upload_data = {'title_desc': f'(中配){translated_title}', 'tags': tags_list}
@@ -1670,50 +1682,74 @@ with tab1:
                     if original_title:
                         st.text(f"原始标题: {original_title}")
                         
-                        SYSTEM_PROMPT = """你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"""
-                        
-                        import requests
-                        payload = {
-                            "model": MODEL_NAME,
-                            "messages": [
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": original_title}
-                            ]
-                        }
-                        headers = {
-                            "Authorization": f"Bearer {API_KEY}",
-                            "Content-Type": "application/json"
-                        }
-                        
-                        response = requests.post(API_URL, json=payload, headers=headers, timeout=60)
-                        response_data = response.json()
-                        
-                        translated_title_with_markdown = response_data['choices'][0]['message']['content']
-                        translated_title = translated_title_with_markdown.replace('**', '').strip()
-                        
-                        st.text(f"翻译标题: {translated_title}")
-                        
-                        TAGS_PROMPT = f"""根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：
+                        if USE_LOCAL_MODEL:
+                            log_container = st.empty()
+                            logs_list = []
+                            def log_to_ui(msg):
+                                print(msg)
+                                logs_list.append(msg)
+                                log_container.code("\n".join(logs_list[-15:]))
+                            
+                            model_path = download_model(
+                                repo_id=LOCAL_MODEL_REPO,
+                                filename=LOCAL_MODEL_FILE,
+                                log_callback=log_to_ui
+                            )
+                            translated_title, tags_list = translate_title_and_tags_local(
+                                original_title=original_title,
+                                model_path=model_path,
+                                n_ctx=LOCAL_N_CTX,
+                                n_gpu_layers=LOCAL_GPU_LAYERS,
+                                log_callback=log_to_ui
+                            )
+                            st.text(f"翻译标题: {translated_title}")
+                            tags_str = ','.join(tags_list)
+                            st.text(f"生成标签: {tags_str}")
+                        else:
+                            SYSTEM_PROMPT = """你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"""
+                            
+                            import requests
+                            payload = {
+                                "model": MODEL_NAME,
+                                "messages": [
+                                    {"role": "system", "content": SYSTEM_PROMPT},
+                                    {"role": "user", "content": original_title}
+                                ]
+                            }
+                            headers = {
+                                "Authorization": f"Bearer {API_KEY}",
+                                "Content-Type": "application/json"
+                            }
+                            
+                            response = requests.post(API_URL, json=payload, headers=headers, timeout=60)
+                            response_data = response.json()
+                            
+                            translated_title_with_markdown = response_data['choices'][0]['message']['content']
+                            translated_title = translated_title_with_markdown.replace('**', '').strip()
+                            
+                            st.text(f"翻译标题: {translated_title}")
+                            
+                            TAGS_PROMPT = f"""根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：
 标题：{translated_title}
 示例标签：科技,人工智能,AI,机器学习,未来
 只输出标签，不要其他内容。"""
-                        
-                        tags_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [
-                                {"role": "system", "content": "你是一个专业的B站运营助手"},
-                                {"role": "user", "content": TAGS_PROMPT}
-                            ]
-                        }
-                        
-                        tags_response = requests.post(API_URL, json=tags_payload, headers=headers, timeout=60)
-                        tags_data = tags_response.json()
-                        
-                        tags_content = tags_data['choices'][0]['message']['content']
-                        tags_list = [t.strip() for t in tags_content.replace('，', ',').split(',') if t.strip()]
-                        tags_str = ','.join(tags_list)
-                        
-                        st.text(f"生成标签: {tags_str}")
+                            
+                            tags_payload = {
+                                "model": MODEL_NAME,
+                                "messages": [
+                                    {"role": "system", "content": "你是一个专业的B站运营助手"},
+                                    {"role": "user", "content": TAGS_PROMPT}
+                                ]
+                            }
+                            
+                            tags_response = requests.post(API_URL, json=tags_payload, headers=headers, timeout=60)
+                            tags_data = tags_response.json()
+                            
+                            tags_content = tags_data['choices'][0]['message']['content']
+                            tags_list = [t.strip() for t in tags_content.replace('，', ',').split(',') if t.strip()]
+                            tags_str = ','.join(tags_list)
+                            
+                            st.text(f"生成标签: {tags_str}")
                         
                         upload_config_file = os.path.join(subtitles_dir, "upload_config.pkl")
                         import pickle

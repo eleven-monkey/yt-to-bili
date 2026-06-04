@@ -239,3 +239,108 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
             except Exception:
                 pass
         del llm
+
+def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = -1, log_callback=None):
+    """
+    使用本地 Llama 模型翻译视频标题并生成视频标签
+    """
+    is_ok, err = check_dependencies()
+    if not is_ok:
+        raise ImportError(err)
+
+    if log_callback:
+        log_callback("正在加载本地模型以翻译标题和生成标签...")
+    else:
+        print("正在加载本地模型以翻译标题和生成标签...")
+    
+    llm = Llama(
+        model_path=model_path,
+        n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
+        verbose=False,
+        chat_format="chatml"
+    )
+    
+    try:
+        # 1. 翻译标题
+        if log_callback:
+            log_callback(f"正在本地翻译标题: '{original_title}' ...")
+        else:
+            print(f"正在本地翻译标题: '{original_title}' ...")
+        
+        system_prompt = "你是爆款视频up主，将英文标题翻译成吸引眼球的爆款视频中文标题，直接输出翻译结果，不要解释。"
+        try:
+            response = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": original_title}
+                ],
+                max_tokens=512,
+                temperature=0.3,
+                top_p=0.95,
+                repeat_penalty=1.2,
+                stop=["<|im_end|>", "user", "system", "assistant"]
+            )
+            translated_title = response["choices"][0]["message"]["content"].replace('**', '').strip()
+        except Exception as e:
+            if log_callback:
+                log_callback(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
+            prompt_template = f"SYSTEM: {system_prompt}\nUSER: {original_title}\nASSISTANT:\n"
+            response = llm(
+                prompt=prompt_template, max_tokens=512, temperature=0.3, top_p=0.95,
+                repeat_penalty=1.2, stop=['USER:', 'SYSTEM:', 'ASSISTANT:'], echo=False
+            )
+            translated_title = response["choices"][0]["text"].replace('**', '').strip()
+            
+        if log_callback:
+            log_callback(f"本地翻译标题结果: '{translated_title}'")
+        else:
+            print(f"本地翻译标题结果: '{translated_title}'")
+
+        # 2. 生成标签
+        if log_callback:
+            log_callback("正在本地生成视频标签...")
+        else:
+            print("正在本地生成视频标签...")
+            
+        system_prompt_tags = "你是一个专业的B站运营助手"
+        tags_prompt = f"根据以下视频标题，生成5-8个B站视频标签（只输出标签，用逗号分隔）：\n标题：{translated_title}\n只输出标签，不要其他内容。"
+        
+        try:
+            response_tags = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt_tags},
+                    {"role": "user", "content": tags_prompt}
+                ],
+                max_tokens=512,
+                temperature=0.3,
+                top_p=0.95,
+                repeat_penalty=1.2,
+                stop=["<|im_end|>", "user", "system", "assistant"]
+            )
+            tags_str = response_tags["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            if log_callback:
+                log_callback(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
+            prompt_template = f"SYSTEM: {system_prompt_tags}\nUSER: {tags_prompt}\nASSISTANT:\n"
+            response_tags = llm(
+                prompt=prompt_template, max_tokens=512, temperature=0.3, top_p=0.95,
+                repeat_penalty=1.2, stop=['USER:', 'SYSTEM:', 'ASSISTANT:'], echo=False
+            )
+            tags_str = response_tags["choices"][0]["text"].strip()
+            
+        tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
+        if log_callback:
+            log_callback(f"本地生成标签结果: {tags_list}")
+        else:
+            print(f"本地生成标签结果: {tags_list}")
+        
+        return translated_title, tags_list
+
+    finally:
+        if hasattr(llm, 'close'):
+            try:
+                llm.close()
+            except Exception:
+                pass
+        del llm
