@@ -120,6 +120,10 @@ def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, log_cal
     # 修复 C: 清除可能产生的连续多余空行，保持字幕紧凑
     result = re.sub(r'\n{3,}', '\n\n', result)
 
+    # 修复 D: 去除特定的标记和无用词
+    for word in ["<|channel>", "thought", "<channel|>"]:
+        result = result.replace(word, "")
+
     return result
 
 def translate_subtitle_file(input_path: str, output_path: str, model_path: str, chunk_size: int = 10, terminology: dict = None, n_ctx: int = 8192, n_gpu_layers: int = -1, log_callback=None):
