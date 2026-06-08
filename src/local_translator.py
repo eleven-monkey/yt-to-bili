@@ -338,48 +338,75 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
         log_callback("正在加载本地模型以翻译标题和生成标签...")
     else:
         print("正在加载本地模型以翻译标题和生成标签...")
-    
+
+    use_chat_completion = "Hy-MT" not in model_path
+
     llm = Llama(
         model_path=model_path,
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
         verbose=False,
-        chat_format="chatml"
     )
-    
+
+    def call_llm(is_chat: bool, system: str, user: str, max_tokens: int = 512) -> str:
+        if is_chat:
+            try:
+                resp = llm.create_chat_completion(
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.2,
+                    top_p=0.9,
+                    repeat_penalty=1.15,
+                    stop=["<|im_end|>", "<|im_start|>"],
+                )
+                return resp["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                msg = f"⚠️ 标题/标签生成异常 (Chat Completion): {e}"
+                if log_callback:
+                    log_callback(msg)
+                else:
+                    print(msg)
+                return ""
+        else:
+            prompt = f"{system}\n\n{user}\n\n"
+            try:
+                resp = llm(
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.2,
+                    top_p=0.9,
+                    repeat_penalty=1.15,
+                    stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
+                    echo=False
+                )
+                return resp["choices"][0]["text"].strip()
+            except Exception as e:
+                msg = f"⚠️ 标题/标签生成异常 (Direct Completion): {e}"
+                if log_callback:
+                    log_callback(msg)
+                else:
+                    print(msg)
+                return ""
+
     try:
         # 1. 翻译标题
         if log_callback:
             log_callback(f"正在本地翻译标题: '{original_title}' ...")
         else:
             print(f"正在本地翻译标题: '{original_title}' ...")
-        
-        system_prompt = "你是一个专业的中英文翻译官。"
-        user_prompt = f"请将以下英文视频标题准确地翻译为中文，直接输出翻译好的中文标题，绝对不要包含任何前缀、解释、标点引号或额外英文文字：\n{original_title}"
-        
-        try:
-            response = llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=512,
-                temperature=0.3,
-                top_p=0.95,
-                repeat_penalty=1.2,
-                stop=["<|im_end|>", "user", "system", "assistant"]
-            )
-            translated_title = response["choices"][0]["message"]["content"].replace('**', '').replace('"', '').replace('“', '').replace('”', '').strip()
-        except Exception as e:
-            if log_callback:
-                log_callback(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
-            prompt_template = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
-            response = llm(
-                prompt=prompt_template, max_tokens=512, temperature=0.3, top_p=0.95,
-                repeat_penalty=1.2, stop=["<|im_end|>", 'USER:', 'SYSTEM:', 'ASSISTANT:'], echo=False
-            )
-            translated_title = response["choices"][0]["text"].replace('**', '').replace('"', '').replace('“', '').replace('”', '').strip()
-            
+
+        system_title = "你是一个专业的中英文翻译官。直接输出翻译结果，不要任何前缀、解释或标点引号。"
+        user_title = f"将以下英文视频标题准确地翻译为中文：\n{original_title}"
+
+        translated_title = call_llm(use_chat_completion, system_title, user_title)
+        translated_title = translated_title.replace('**', '').replace('"', '').replace('“', '').replace('”', '').strip()
+
+        if not translated_title:
+            translated_title = original_title
+
         if log_callback:
             log_callback(f"本地翻译标题结果: '{translated_title}'")
         else:
@@ -390,54 +417,31 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
             log_callback("正在本地生成视频标签...")
         else:
             print("正在本地生成视频标签...")
-            
-        system_prompt_tags = "你是一个专业的视频运营助手。"
-        tags_prompt = f"请根据以下中文视频标题，提取或生成5到8个适合的视频分类标签，并用英文逗号分隔输出（只输出标签，绝对不要包含任何前缀、序号或多余解释）：\n标题：{translated_title}"
-        
-        try:
-            response_tags = llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt_tags},
-                    {"role": "user", "content": tags_prompt}
-                ],
-                max_tokens=512,
-                temperature=0.3,
-                top_p=0.95,
-                repeat_penalty=1.2,
-                stop=["<|im_end|>", "user", "system", "assistant"]
-            )
-            tags_str = response_tags["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            if log_callback:
-                log_callback(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
-            prompt_template = f"<|im_start|>system\n{system_prompt_tags}<|im_end|>\n<|im_start|>user\n{tags_prompt}<|im_end|>\n<|im_start|>assistant\n"
-            response_tags = llm(
-                prompt=prompt_template, max_tokens=512, temperature=0.3, top_p=0.95,
-                repeat_penalty=1.2, stop=["<|im_end|>", 'USER:', 'SYSTEM:', 'ASSISTANT:'], echo=False
-            )
-            tags_str = response_tags["choices"][0]["text"].strip()
-            
+
+        system_tags = "你是一个专业的视频运营助手。只输出用英文逗号分隔的标签，绝对不要任何前缀、序号或多余解释。"
+        user_tags = f"根据以下中文视频标题，提取或生成5到8个适合的视频分类标签：\n标题：{translated_title}"
+
+        tags_str = call_llm(use_chat_completion, system_tags, user_tags)
         tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()]
-        
-        # 兜底防御性逻辑：针对无法进行任务指令微调的纯翻译模型进行关键字提取
+
         if not tags_list or len(tags_list) < 2 or any(len(t) > 15 for t in tags_list) or any("根据" in t for t in tags_list):
             if log_callback:
                 log_callback("⚠️ 检测到本地模型无法合理生成标签，自动从中文标题提取关键词作为视频标签...")
             else:
                 print("⚠️ 检测到本地模型无法合理生成标签，自动从中文标题提取关键词作为视频标签...")
-            
+
             import re
             words = re.findall(r'[\u4e00-\u9fa5]{2,}', translated_title)
             if words:
                 tags_list = list(set(words))[:6]
             else:
                 tags_list = ["科技", "人工智能", "视频"]
-                
+
         if log_callback:
             log_callback(f"本地生成标签结果: {tags_list}")
         else:
             print(f"本地生成标签结果: {tags_list}")
-        
+
         return translated_title, tags_list
 
     finally:
