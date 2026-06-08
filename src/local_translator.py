@@ -51,78 +51,99 @@ def download_model(repo_id="tencent/Hy-MT2-1.8B-GGUF", filename="Hy-MT2-1.8B-Q4_
         
     return model_path
 
-def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, log_callback=None):
+def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, use_chat_completion: bool, log_callback=None):
     """
-    核心翻译函数，包含时间戳格式自动修复
+    核心翻译函数：采用极简强硬指令，杜绝模型“聊天”和幻觉
     """
-    # 1. 基础指令（彻底消除歧义，强调逐行1对1，禁止总结）
-    base_instruction = """请将以下字幕文本准确翻译为中文。
-
-【风格要求】
-1. 译文必须通顺、易懂，高度符合中文日常口语表达习惯，多用常用词汇，避免生硬直译和机翻味。
-2. 句子结构要自然流畅，符合字幕的阅读节奏。
-
-【格式与结构约束】（极度重要）
-1. 逐行严格对应：原文有多少行，译文就必须有多少行。必须保持原有的换行顺序，绝对禁止合并段落、禁止总结、禁止意译、禁止遗漏任何一行。
-2. 时间戳强制保留：译文的【每一行】都必须以原文对应的时间戳开头，格式严格为 (HH:MM:SS.mmm)。绝对不可遗漏、修改或丢弃任何时间戳。
-3. 标点极度注意：绝对禁止将毫秒前的小数点 "." 写成冒号 ":"（例如：严禁输出 (00:00:02:720)，必须输出 (00:00:02.720)）。
-4. 直接输出翻译后的字幕内容，绝对不要包含“助手：”、“翻译结果：”等任何前缀或额外解释。"""
-
-    # 2. 根据 terminology 变量动态构建 Prompt
+    # 1. 构建术语文本
+    term_text = ""
     if terminology:
-        term_lines = [f"{k} 翻译成 {v}" for k, v in terminology.items()]
-        term_text = "\n".join(term_lines)
-        prompt = f"""参考下面的专有名词翻译：
-{term_text}
+        term_lines = [f"- {k} 必须翻译为 {v}" for k, v in terminology.items()]
+        term_text = "\n".join(term_lines) + "\n"
 
-{base_instruction}
+    if use_chat_completion:
+        # Construct messages for chat completion
+        system_content = "你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。\n\n【绝对规则】\n1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。\n2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。\n3. 风格：中文口语化，通顺易懂。\n" + term_text
+        user_content = f"【待翻译文本】\n\n{subtitle_text}\n\n【翻译结果】："
 
-{subtitle_text}"""
-    else:
-        prompt = f"""{base_instruction}
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content}
+        ]
 
-{subtitle_text}"""
+        try:
+            response = llm_instance.create_chat_completion(
+                messages=messages,
+                max_tokens=4096,
+                temperature=0.2,       # 进一步降低温度，减少胡言乱语的概率
+                top_p=0.9,
+                repeat_penalty=1.15,
+                stop=["<|im_end|>", "<|im_start|>"], # Stop tokens for chat format
+            )
+            result = response["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            msg = f"⚠️ 翻译异常 (Chat Completion): {e}"
+            if log_callback:
+                log_callback(msg)
+            else:
+                print(msg)
+            return ""
+    else: # Use direct prompt completion for Hy-MT models
+        # 2. 极简、强硬的指令 Prompt (Instruct 风格，杜绝对话感)
+        prompt = f"""你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。
 
-    # 3. 使用内置聊天接口
-    try:
-        response = llm_instance.create_chat_completion(
-            messages=[
-                {"role": "system", "content": "你是一个专业的字幕翻译专家。你的译文通顺自然、符合中文日常表达习惯，且能严格遵守时间与格式约束。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=4096,
-            temperature=0.3,
-            top_p=0.95,
-            repeat_penalty=1.2,
-            stop=["<|im_end|>", "user", "system", "assistant"]
-        )
-        result = response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        if log_callback:
-            log_callback(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
-        else:
-            print(f"⚠️ 聊天接口调用异常 ({e})，尝试使用基础补全模式...")
-        prompt_template = f"SYSTEM: 你是一个专业的字幕翻译专家。\nUSER: {prompt}\nASSISTANT:\n"
-        response = llm_instance(
-            prompt=prompt_template, max_tokens=4096, temperature=0.3, top_p=0.95,
-            repeat_penalty=1.2, stop=['USER:', 'SYSTEM:', 'ASSISTANT:'], echo=False
-        )
-        result = response["choices"][0]["text"].strip()
+【绝对规则】
+1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。
+2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。
+3. 风格：中文口语化，通顺易懂。
+4. {term_text}
+【待翻译文本】
 
-    # ================= 4. 强力代码兜底清洗与修复 =================
+{subtitle_text}
 
-    # 修复 A: 自动修正时间戳中错误的冒号 (00:00:02:720) -> (00:00:02.720)
-    result = re.sub(r'\((\d{2}:\d{2}:\d{2}):(\d{3})\)', r'(\1.\2)', result)
+【翻译结果】（直接从第一行时间戳开始输出，不要有任何前缀）：
+"""
+        try:
+            response = llm_instance(
+                prompt=prompt,
+                max_tokens=4096,
+                temperature=0.2,       # 进一步降低温度，减少胡言乱语的概率
+                top_p=0.9,
+                repeat_penalty=1.15,
+                stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
+                echo=False
+            )
+            result = response["choices"][0]["text"].strip()
+        except Exception as e:
+            msg = f"⚠️ 翻译异常 (Direct Completion): {e}"
+            if log_callback:
+                log_callback(msg)
+            else:
+                print(msg)
+            return ""
 
-    # 修复 B: 切除可能出现的“助手：”、“翻译结果：”等废话前缀 (支持多行匹配)
-    result = re.sub(r'^[\s]*(助手[：:]|翻译结果[：:]|翻译如下[：:]|AI[：:]|Assistant[：:])[ \t]*', '', result, flags=re.MULTILINE)
+    # ================= 4. 强力代码兜底清洗 (针对你遇到的混乱情况) =================
 
-    # 修复 C: 清除可能产生的连续多余空行，保持字幕紧凑
-    result = re.sub(r'\n{3,}', '\n\n', result)
+    # 修复 A: 清除所有 ChatML 泄漏标记和模型自我确认的废话
+    result = re.sub(r'<\|im_end\|>|<\|im_start\|>', '', result)
+    result = re.sub(r'^[\s]*(我已了解|我已完全理解|好的|明白|Assistant:|翻译结果:)[^\n]*\n*', '', result, flags=re.MULTILINE | re.IGNORECASE)
 
-    # 修复 D: 去除特定的标记和无用词
-    for word in ["<|channel>", "thought", "<channel|>"]:
-        result = result.replace(word, "")
+    # 修复 B: 自动修正时间戳中错误的冒号和位数错乱 (例如 000:10:43.120 -> 00:10:43.120)
+    result = re.sub(r'\((\d+):(\d+):(\d+)[:.](\d+)\)',
+                    lambda m: f"({int(m.group(1)):02d}:{int(m.group(2)):02d}:{int(m.group(3)):02d}.{m.group(4)})",
+                    result)
+
+    # 修复 C: 过滤掉所有【不以标准时间戳开头】的无效行（彻底消灭模型的胡言乱语行）
+    valid_lines = []
+    timestamp_pattern = re.compile(r'^\(\d{2}:\d{2}:\d{2}\.\d{3}\)')
+    for line in result.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if timestamp_pattern.match(line):
+            valid_lines.append(line)
+
+    result = "\n".join(valid_lines)
 
     return result
 
@@ -137,17 +158,20 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
     if terminology is None:
         terminology = {}
 
-    # 1. 读取原文本
     with open(input_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines() if line.strip()]
 
     if not lines:
         msg = "❌ 字幕文件为空或无有效内容！"
-        if log_callback: log_callback(msg)
-        else: print(msg)
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
         return
 
-    # 2. 分片
+    use_chat_completion = "Hy-MT" not in model_path
+
+    # Initial chunks (can be modified if subdivision occurs)
     chunks = []
     for i in range(0, len(lines), chunk_size):
         chunks.append(lines[i:i+chunk_size])
@@ -158,13 +182,17 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
     else:
         msg_init += f"\n📖 使用 Default Translation 模式。\n"
 
-    if log_callback: log_callback(msg_init)
-    else: print(msg_init)
+    if log_callback:
+        log_callback(msg_init)
+    else:
+        print(msg_init)
 
-    # 3. 加载模型
+    # 加载模型
     msg_load = f"正在加载本地模型 {model_path}，请稍候（首次加载可能需要较长时间）..."
-    if log_callback: log_callback(msg_load)
-    else: print(msg_load)
+    if log_callback:
+        log_callback(msg_load)
+    else:
+        print(msg_load)
 
     # 实例化 Llama 模型
     llm = Llama(
@@ -172,68 +200,122 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
         verbose=False,
-        chat_format="chatml"
+        
     )
 
     msg_loaded = "模型加载完成，开始逐片翻译...\n"
-    if log_callback: log_callback(msg_loaded)
-    else: print(msg_loaded)
+    if log_callback:
+        log_callback(msg_loaded)
+    else:
+        print(msg_loaded)
 
     translated_chunks = []
+    processed_chunk_index = 0 # This will track our progress through the (potentially dynamic) chunks list
 
     try:
-        # 逐片翻译
-        for idx, chunk in enumerate(chunks):
-            chunk_text = "\n".join(chunk)
-            msg_progress = f"⏳ 正在翻译第 {idx + 1}/{len(chunks)} 片..."
-            if log_callback: log_callback(msg_progress)
-            else: print(msg_progress)
+        while processed_chunk_index < len(chunks):
+            current_chunk = chunks[processed_chunk_index]
+            chunk_text = "\n".join(current_chunk)
 
-            max_retries = 3
-            translated_text = ""
+            msg_progress = f"⏳ 正在翻译第 {processed_chunk_index + 1}/{len(chunks)} 片 (原始行数: {len(current_chunk)})... "
+            if log_callback:
+                log_callback(msg_progress)
+            else:
+                print(msg_progress)
+
+            translated_text_for_this_chunk = ""
+            success = False
+            max_retries = 3 # Define max retries for a single chunk
+            mid_point = 0
 
             for attempt in range(max_retries):
                 try:
-                    translated_text = translate_chunk(chunk_text, llm, terminology, log_callback)
+                    translated_text_for_this_chunk = translate_chunk(chunk_text, llm, terminology, use_chat_completion, log_callback)
+                    trans_lines = [l for l in translated_text_for_this_chunk.split('\n') if l.strip()]
 
-                    # 验证行数是否匹配
-                    trans_lines = [l for l in translated_text.split('\n') if l.strip()]
-                    if len(trans_lines) < len(chunk) * 0.8:
-                        warn_msg = f"⚠️ 警告：译文行数 ({len(trans_lines)}) 明显少于原文 ({len(chunk)})，可能发生截断，正在重试 ({attempt+1}/{max_retries})..."
-                        if log_callback: log_callback(warn_msg)
-                        else: print(warn_msg)
+                    if len(trans_lines) == len(current_chunk):
+                        success = True
+                        msg_success = f"✅ 第 {processed_chunk_index + 1}/{len(chunks)} 片翻译成功！"
+                        if log_callback:
+                            log_callback(msg_success)
+                        else:
+                            print(msg_success)
+                        break # Successfully translated this chunk
+
+                    else:
+                        warn_msg = f"\n⚠️ 警告：有效译文行数 ({len(trans_lines)}) 与原文 ({len(current_chunk)}) 不一致，模型可能产生了幻觉或遗漏，正在重试 ({attempt+1}/{max_retries})..."
+                        if log_callback:
+                            log_callback(warn_msg)
+                        else:
+                            print(warn_msg)
                         
-                        if attempt == max_retries - 1:
-                            err_msg = "❌ 重试失败，将保留当前部分翻译结果继续。"
-                            if log_callback: log_callback(err_msg)
-                            else: print(err_msg)
-                        continue
-                    break
+                        dbg_msg = (
+                            "--- 原始提交给模型的内容 ---\n" + chunk_text + "\n" +
+                            "--- 模型返回的翻译结果 ---\n" + translated_text_for_this_chunk + "\n" +
+                            f"--- 失败分析：原始行数 {len(current_chunk)}，模型返回有效行数 {len(trans_lines)} ---"
+                        )
+                        if log_callback:
+                            log_callback(dbg_msg)
+                        else:
+                            print(dbg_msg)
+
+                        if attempt == max_retries - 1: # Last attempt failed for this chunk
+                            fail_msg = f"❌ 第 {processed_chunk_index + 1}/{len(chunks)} 片经过 {max_retries} 次重试后仍然失败。尝试拆分..."
+                            if log_callback:
+                                log_callback(fail_msg)
+                            else:
+                                print(fail_msg)
+
+                            mid_point = len(current_chunk) // 2
+                            if mid_point == 0 or len(current_chunk) == 1: # Cannot subdivide further
+                                fail_warn = f"❌ 警告：无法进一步拆分只有1行的失败片段。将保留当前结果。"
+                                if log_callback:
+                                    log_callback(fail_warn)
+                                else:
+                                    print(fail_warn)
+                                # Append the best (last) failed attempt's result and move on
+                                translated_chunks.append(translated_text_for_this_chunk)
+                                processed_chunk_index += 1
+                                success = True # Treat as 'processed' to move to next logical chunk
+                                break # Exit retry loop
+                            else:
+                                first_half = current_chunk[:mid_point]
+                                second_half = current_chunk[mid_point:]
+
+                                # Replace the current failing chunk with two smaller chunks at its position
+                                chunks[processed_chunk_index:processed_chunk_index+1] = [first_half, second_half]
+                                split_msg = f"  已将片段拆分为两部分 (大小: {len(first_half)}, {len(second_half)})，将重新处理。"
+                                if log_callback:
+                                    log_callback(split_msg)
+                                else:
+                                    print(split_msg)
+                                success = False # The overall 'current_chunk' failed, will re-attempt smaller ones
+                                break # Exit retry loop, and the while loop will pick up the new chunks
 
                 except Exception as e:
                     err_msg = f"❌ 发生异常: {e}，正在重试 ({attempt+1}/{max_retries})...\n{traceback.format_exc()}"
-                    if log_callback: log_callback(err_msg)
-                    else: print(err_msg)
+                    if log_callback:
+                        log_callback(err_msg)
+                    else:
+                        print(err_msg)
                     if attempt == max_retries - 1:
                         raise e
 
-            translated_chunks.append(translated_text)
+            if success and len(trans_lines) == len(current_chunk): # Successfully translated and line count matches
+                 translated_chunks.append(translated_text_for_this_chunk)
+                 processed_chunk_index += 1
+            elif success and (mid_point == 0 or len(current_chunk) == 1):
+                 pass
 
-            # 实时打印/记录当前片段的翻译结果
-            msg_done = f"✅ 第 {idx + 1}/{len(chunks)} 片翻译完成！结果如下：\n" + "-" * 40 + "\n" + translated_text + "\n" + "-" * 40
-            if log_callback: log_callback(msg_done)
-            else:
-                print(msg_done)
-                print()
-
-        # 4. 合成并写入文件
         final_result = "\n".join(translated_chunks)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(final_result)
 
         msg_end = f"\n🎉 全部翻译完成！最终文件已保存至: {output_path}"
-        if log_callback: log_callback(msg_end)
-        else: print(msg_end)
+        if log_callback:
+            log_callback(msg_end)
+        else:
+            print(msg_end)
 
     finally:
         # 清理并关闭 Llama 实例以释放内存/显存
