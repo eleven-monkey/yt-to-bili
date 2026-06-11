@@ -441,10 +441,11 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
         tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()]
 
         if not tags_list or len(tags_list) < 2 or any(len(t) > 15 for t in tags_list) or any("根据" in t for t in tags_list):
+            msg_fail = f"⚠️ 检测到本地模型无法合理生成标签。模型原始输出：'{tags_str}'。自动从中文标题提取关键词作为视频标签..."
             if log_callback:
-                log_callback("⚠️ 检测到本地模型无法合理生成标签，自动从中文标题提取关键词作为视频标签...")
+                log_callback(msg_fail)
             else:
-                print("⚠️ 检测到本地模型无法合理生成标签，自动从中文标题提取关键词作为视频标签...")
+                print(msg_fail)
 
             import re
             words = re.findall(r'[\u4e00-\u9fa5]{2,}', translated_title)
