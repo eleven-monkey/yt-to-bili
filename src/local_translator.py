@@ -128,6 +128,10 @@ def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, use_cha
     result = re.sub(r'<\|im_end\|>|<\|im_start\|>', '', result)
     result = re.sub(r'^[\s]*(我已了解|我已完全理解|好的|明白|Assistant:|翻译结果:)[^\n]*\n*', '', result, flags=re.MULTILINE | re.IGNORECASE)
 
+    # 修复 A2: 清理不需朗读的各种噪点标签，如 [音乐], [Music], (Laughter) 等
+    result = re.sub(r'\[音乐\]|\[Music\]|\[笑声\]|\[Laughter\]|\[Applause\]|\[掌声\]', '', result, flags=re.IGNORECASE)
+    result = re.sub(r'\(Music\)|\(音乐\)|\(Laughter\)|\(笑声\)|\(Applause\)|\(掌声\)', '', result, flags=re.IGNORECASE)
+
     # 修复 B: 自动修正时间戳中错误的冒号 and 位数错乱 (例如 000:10:43.120 -> 00:10:43.120)
     result = re.sub(r'\((\d+):(\d+):(\d+)[:.](\d+)\)',
                     lambda m: f"({int(m.group(1)):02d}:{int(m.group(2)):02d}:{int(m.group(3)):02d}.{m.group(4)})",
