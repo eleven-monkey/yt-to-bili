@@ -88,39 +88,39 @@ def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, use_cha
             else:
                 print(msg)
             return ""
-    else: # Use direct prompt completion for Hy-MT models
-        # 2. 极简、强硬的指令 Prompt (Instruct 风格，杜绝对话感)
-        prompt = f"""你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。
-
-【绝对规则】
-1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。
-2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。
-3. 风格：中文口语化，通顺易懂。
-4. {term_text}
-【待翻译文本】
-
-{subtitle_text}
-
-【翻译结果】（直接从第一行时间戳开始输出，不要有任何前缀）：
-"""
-        try:
-            response = llm_instance(
-                prompt=prompt,
-                max_tokens=4096,
-                temperature=0.2,       # 进一步降低温度，减少胡言乱语的概率
-                top_p=0.9,
-                repeat_penalty=1.15,
-                stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
-                echo=False
-            )
-            result = response["choices"][0]["text"].strip()
-        except Exception as e:
-            msg = f"⚠️ 翻译异常 (Direct Completion): {e}"
-            if log_callback:
-                log_callback(msg)
-            else:
-                print(msg)
-            return ""
+    # else: # Use direct prompt completion for Hy-MT models
+    #     # 2. 极简、强硬的指令 Prompt (Instruct 风格，杜绝对话感)
+    #     prompt = f"""你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。
+    # 
+    # 【绝对规则】
+    # 1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。
+    # 2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。
+    # 3. 风格：中文口语化，通顺易懂。
+    # 4. {term_text}
+    # 【待翻译文本】
+    # 
+    # {subtitle_text}
+    # 
+    # 【翻译结果】（直接从第一行时间戳开始输出，不要有任何前缀）：
+    # """
+    #     try:
+    #         response = llm_instance(
+    #             prompt=prompt,
+    #             max_tokens=4096,
+    #             temperature=0.2,       # 进一步降低温度，减少胡言乱语的概率
+    #             top_p=0.9,
+    #             repeat_penalty=1.15,
+    #             stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
+    #             echo=False
+    #         )
+    #         result = response["choices"][0]["text"].strip()
+    #     except Exception as e:
+    #         msg = f"⚠️ 翻译异常 (Direct Completion): {e}"
+    #         if log_callback:
+    #             log_callback(msg)
+    #         else:
+    #             print(msg)
+    #         return ""
 
     # ================= 4. 强力代码兜底清洗 (针对你遇到的混乱情况) =================
 
@@ -128,7 +128,7 @@ def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, use_cha
     result = re.sub(r'<\|im_end\|>|<\|im_start\|>', '', result)
     result = re.sub(r'^[\s]*(我已了解|我已完全理解|好的|明白|Assistant:|翻译结果:)[^\n]*\n*', '', result, flags=re.MULTILINE | re.IGNORECASE)
 
-    # 修复 B: 自动修正时间戳中错误的冒号和位数错乱 (例如 000:10:43.120 -> 00:10:43.120)
+    # 修复 B: 自动修正时间戳中错误的冒号 and 位数错乱 (例如 000:10:43.120 -> 00:10:43.120)
     result = re.sub(r'\((\d+):(\d+):(\d+)[:.](\d+)\)',
                     lambda m: f"({int(m.group(1)):02d}:{int(m.group(2)):02d}:{int(m.group(3)):02d}.{m.group(4)})",
                     result)
@@ -169,7 +169,8 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
             print(msg)
         return
 
-    use_chat_completion = "Hy-MT" not in model_path
+    # use_chat_completion = "Hy-MT" not in model_path
+    use_chat_completion = True
 
     # Initial chunks (can be modified if subdivision occurs)
     chunks = []
@@ -339,7 +340,8 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
     else:
         print("正在加载本地模型以翻译标题和生成标签...")
 
-    use_chat_completion = "Hy-MT" not in model_path
+    # use_chat_completion = "Hy-MT" not in model_path
+    use_chat_completion = True
 
     llm = Llama(
         model_path=model_path,
@@ -370,26 +372,26 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
                 else:
                     print(msg)
                 return ""
-        else:
-            prompt = f"{system}\n\n{user}\n\n"
-            try:
-                resp = llm(
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=0.2,
-                    top_p=0.9,
-                    repeat_penalty=1.15,
-                    stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
-                    echo=False
-                )
-                return resp["choices"][0]["text"].strip()
-            except Exception as e:
-                msg = f"⚠️ 标题/标签生成异常 (Direct Completion): {e}"
-                if log_callback:
-                    log_callback(msg)
-                else:
-                    print(msg)
-                return ""
+        # else:
+        #     prompt = f"{system}\n\n{user}\n\n"
+        #     try:
+        #         resp = llm(
+        #             prompt=prompt,
+        #             max_tokens=max_tokens,
+        #             temperature=0.2,
+        #             top_p=0.9,
+        #             repeat_penalty=1.15,
+        #             stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
+        #             echo=False
+        #         )
+        #         return resp["choices"][0]["text"].strip()
+        #     except Exception as e:
+        #         msg = f"⚠️ 标题/标签生成异常 (Direct Completion): {e}"
+        #         if log_callback:
+        #             log_callback(msg)
+        #         else:
+        #             print(msg)
+        #         return ""
 
     try:
         # 1. 翻译标题
