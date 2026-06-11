@@ -420,8 +420,18 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
         else:
             print("正在本地生成视频标签...")
 
-        system_tags = "你是一个专业的视频运营助手。只输出用英文逗号分隔的标签，绝对不要任何前缀、序号或多余解释。"
-        user_tags = f"根据以下中文视频标题，提取或生成5到8个适合的视频分类标签：\n标题：{translated_title}"
+        system_tags = (
+            "你是一个专业的视频运营助手。你的任务是根据视频标题，生成5到8个适合的视频分类标签。\n"
+            "【输出格式要求】\n"
+            "只输出标签本身，用英文半角逗号(,)分隔。绝对不要包含任何前缀、序号、解释、提示词或多余的标点符号。\n"
+            "【示例1】\n"
+            "标题：双缝干涉实验中光子的神秘行为\n"
+            "标签输出：科普,物理,量子力学\n"
+            "【示例2】\n"
+            "标题：库尔斯克会战：苏德战场的转折点\n"
+            "标签输出：军事,历史,二战,东线"
+        )
+        user_tags = f"根据以下中文视频标题，提取或生成5到8个适合的视频分类标签：\n标题：{translated_title}\n标签输出："
 
         tags_str = call_llm(use_chat_completion, system_tags, user_tags)
         tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()]
