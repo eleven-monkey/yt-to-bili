@@ -1244,7 +1244,7 @@ VOICE_ALIAS_MAP = {
 VOICE_ALIAS_REVERSE = {v: k for k, v in VOICE_ALIAS_MAP.items()}
 SELECTED_VOICE = st.sidebar.selectbox("TTS语音角色", options=VOICE_CHOICES, index=1, key="selected_voice")
 
-MAX_WORKERS = st.sidebar.slider("翻译并发数", min_value=1, max_value=20, value=10, help="同时翻译的段落数量")
+MAX_WORKERS = st.sidebar.slider("在线API并发数", min_value=1, max_value=20, value=10, help="同时向翻译API发起请求的并发线程数")
 SEGMENT_SIZE = st.sidebar.slider("翻译分段大小", min_value=1, max_value=20, value=11, help="每次翻译包含的段落数量")
 
 st.sidebar.markdown("---")
@@ -1961,95 +1961,15 @@ with tab1:
                             st.success("本地模型翻译完成！")
                             st.info(f"输出文件: {output_translated_file}")
                         else:
-                            paragraphs = [line.strip() for line in open(output_txt_file, 'r', encoding='utf-8') if line.strip()]
-                            
-                            print(f"调试信息：读取到 {len(paragraphs)} 个段落")
-                            
-                            batched_paragraphs = []
-                            current_batch = []
-                            current_char_count = 0
-                            
-                            for i, paragraph in enumerate(paragraphs):
-                                paragraph_char_count = len(paragraph)
-                                if (len(current_batch) >= SEGMENT_SIZE) or (current_char_count + paragraph_char_count > 2000 and current_batch):
-                                    batched_paragraphs.append("\n".join(current_batch))
-                                    print(f"调试信息：分段 {len(batched_paragraphs)} 包含 {len(current_batch)} 个段落，共 {current_char_count} 字符")
-                                    current_batch = [paragraph]
-                                    current_char_count = paragraph_char_count
-                                else:
-                                    current_batch.append(paragraph)
-                                    current_char_count += paragraph_char_count
-                            
-                            if current_batch:
-                                batched_paragraphs.append("\n".join(current_batch))
-                                print(f"调试信息：最后一个分段 {len(batched_paragraphs)} 包含 {len(current_batch)} 个段落，共 {current_char_count} 字符")
-                            
-                            print(f"调试信息：总共 {len(batched_paragraphs)} 个翻译分段")
-                            
-                            def translate_batch(batch, batch_index):
-                                try:
-                                    print(f"调试信息：开始翻译分段 {batch_index}，内容长度: {len(batch)} 字符")
-                                    print(f"分段内容预览: {batch[:200]}...")
-                                    
-                                    url = API_URL
-                                    headers = {
-                                        "Content-Type": "application/json",
-                                        "Authorization": f"Bearer {API_KEY}"
-                                    }
-                                    payload = {
-                                        "model": MODEL_NAME,
-                                        "messages": [
-                                            {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
-                                            {"role": "user", "content": batch}
-                                        ],
-                                        "stream": False,
-                                        "max_tokens": 4000
-                                    }
-                                    print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
-                                    response = requests.post(url, json=payload, headers=headers, timeout=60)
-                                    print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
-                                    response.raise_for_status()
-                                    result = response.json()
-                                    translated_content = result['choices'][0]['message']['content']
-                                    print(f"调试信息：分段 {batch_index} 翻译结果长度: {len(translated_content)} 字符")
-                                    print(f"翻译结果预览: {translated_content[:200]}...")
-                                    return translated_content
-                                except Exception as e:
-                                    print(f"调试信息：分段 {batch_index} 翻译失败: {str(e)}")
-                                    import traceback
-                                    print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
-                                    return f"Error: {str(e)}"
-                            
-                            translated_results = {}
-                            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                                futures = {executor.submit(translate_batch, batch, i): i for i, batch in enumerate(batched_paragraphs)}
-                                
-                                progress_bar = st.progress(0)
-                                completed = 0
-                                for future in as_completed(futures):
-                                    index = futures[future]
-                                    result = future.result()
-                                    if not result.startswith("Error:"):
-                                        translated_results[index] = result
-                                    completed += 1
-                                    progress_bar.progress(completed / len(batched_paragraphs))
-                            
-                            translated_paragraphs = []
-                            failed_count = 0
-                            
-                            for i in range(len(batched_paragraphs)):
-                                if i in translated_results:
-                                    translated_paragraphs.append(translated_results[i])
-                                else:
-                                    failed_count += 1
-                            
-                            output_translated_file = os.path.splitext(vtt_file_path)[0] + "_translated.txt"
-                            with open(output_translated_file, 'w', encoding='utf-8') as f:
-                                for seg in translated_paragraphs:
-                                    cleaned = seg.replace('&gt;', '').replace('>>', '').replace('&trash;', '').replace('> ', '').replace('&nbsp;', '').replace('_', '').replace('＞', '').replace('[音乐]', '')
-                                    f.write(cleaned + "\n\n")
-                            
-                            st.success(f"翻译完成！成功: {len(translated_paragraphs)} 段落，失败: {failed_count}")
+                            output_translated_file = translate_subtitles_from_vtt(vtt_file_path, api_config={
+                                "API_URL": API_URL,
+                                "API_KEY": API_KEY,
+                                "MODEL_NAME": MODEL_NAME,
+                                "MAX_WORKERS": MAX_WORKERS,
+                                "SEGMENT_SIZE": SEGMENT_SIZE,
+                                "use_local_model": False
+                            })
+                            st.success("API 翻译完成！")
                             st.info(f"输出文件: {output_translated_file}")
                         
                     except Exception as e:
