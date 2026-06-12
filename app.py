@@ -223,6 +223,7 @@ class WorkflowManager:
         if current_status:
             current_status["is_running"] = False
             current_status["error"] = error_msg
+            current_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 发生错误: {error_msg}")
             WorkflowManager.save_status(temp_dir, current_status)
 
 def background_workflow_task(config):
@@ -329,7 +330,12 @@ def background_workflow_task(config):
                     ]
                 }
                 resp = requests.post(config['api_url'], json=payload, headers=headers, timeout=60)
-                translated_title = resp.json()['choices'][0]['message']['content'].replace('**', '').strip()
+                if resp.status_code != 200:
+                    raise Exception(f"API标题翻译请求失败，状态码: {resp.status_code}，响应内容: {resp.text}")
+                resp_json = resp.json()
+                if 'choices' not in resp_json:
+                    raise KeyError(f"API标题翻译响应中未包含 'choices' 字段。完整响应: {resp_json}")
+                translated_title = resp_json['choices'][0]['message']['content'].replace('**', '').strip()
                 
                 # 标签生成
                 tags_payload = {
@@ -340,7 +346,12 @@ def background_workflow_task(config):
                     ]
                 }
                 tags_resp = requests.post(config['api_url'], json=tags_payload, headers=headers, timeout=60)
-                tags_str = tags_resp.json()['choices'][0]['message']['content']
+                if tags_resp.status_code != 200:
+                    raise Exception(f"API标签生成请求失败，状态码: {tags_resp.status_code}，响应内容: {tags_resp.text}")
+                tags_json = tags_resp.json()
+                if 'choices' not in tags_json:
+                    raise KeyError(f"API标签生成响应中未包含 'choices' 字段。完整响应: {tags_json}")
+                tags_str = tags_json['choices'][0]['message']['content']
                 tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
             
             # 保存上传配置
@@ -674,6 +685,13 @@ def background_workflow_task(config):
         if str(e) != "用户手动中止任务":
             err_msg += f"\n{traceback.format_exc()}"
             print(f"后台任务出错: {err_msg}")
+        
+        # 写入详细日志，以便 Streamlit 前台能看见具体报错堆栈
+        curr_status = WorkflowManager.load_status(temp_dir)
+        if curr_status:
+            curr_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 任务异常详情:\n{err_msg}")
+            WorkflowManager.save_status(temp_dir, curr_status)
+            
         WorkflowManager.mark_error(temp_dir, str(e))
 
 # --- 批量工作流相关 ---
@@ -868,7 +886,15 @@ def background_batch_workflow_task(batch_config):
 
     except Exception as e:
         import traceback
-        print(f"批量任务出错: {e}\n{traceback.format_exc()}")
+        err_msg_batch = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"批量任务出错: {err_msg_batch}")
+        
+        # 写入批量任务详细错误日志
+        curr_batch_status = BatchWorkflowManager.load_status(base_dir)
+        if curr_batch_status:
+            curr_batch_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 批量总任务异常详情:\n{err_msg_batch}")
+            BatchWorkflowManager.save_status(base_dir, curr_batch_status)
+            
         BatchWorkflowManager.mark_error(base_dir, str(e))
 
 def clear_temp_directory():
