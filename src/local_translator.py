@@ -88,39 +88,6 @@ def translate_chunk(subtitle_text: str, llm_instance, terminology: dict, use_cha
             else:
                 print(msg)
             return ""
-    # else: # Use direct prompt completion for Hy-MT models
-    #     # 2. 极简、强硬的指令 Prompt (Instruct 风格，杜绝对话感)
-    #     prompt = f"""你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。
-    # 
-    # 【绝对规则】
-    # 1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。
-    # 2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。
-    # 3. 风格：中文口语化，通顺易懂。
-    # 4. {term_text}
-    # 【待翻译文本】
-    # 
-    # {subtitle_text}
-    # 
-    # 【翻译结果】（直接从第一行时间戳开始输出，不要有任何前缀）：
-    # """
-    #     try:
-    #         response = llm_instance(
-    #             prompt=prompt,
-    #             max_tokens=4096,
-    #             temperature=0.2,       # 进一步降低温度，减少胡言乱语的概率
-    #             top_p=0.9,
-    #             repeat_penalty=1.15,
-    #             stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
-    #             echo=False
-    #         )
-    #         result = response["choices"][0]["text"].strip()
-    #     except Exception as e:
-    #         msg = f"⚠️ 翻译异常 (Direct Completion): {e}"
-    #         if log_callback:
-    #             log_callback(msg)
-    #         else:
-    #             print(msg)
-    #         return ""
 
     # ================= 4. 强力代码兜底清洗 (针对你遇到的混乱情况) =================
 
@@ -238,7 +205,7 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
                     translated_text_for_this_chunk = translate_chunk(chunk_text, llm, terminology, use_chat_completion, log_callback)
                     trans_lines = [l for l in translated_text_for_this_chunk.split('\n') if l.strip()]
 
-                    if len(trans_lines) == len(current_chunk):
+                    if len(trans_lines) in (len(current_chunk), len(current_chunk) - 1):
                         success = True
                         msg_success = f"✅ 第 {processed_chunk_index + 1}/{len(chunks)} 片翻译成功！"
                         if log_callback:
@@ -301,12 +268,10 @@ def translate_subtitle_file(input_path: str, output_path: str, model_path: str, 
                     err_msg = f"❌ 发生异常: {e}，正在重试 ({attempt+1}/{max_retries})...\n{traceback.format_exc()}"
                     if log_callback:
                         log_callback(err_msg)
-                    else:
-                        print(err_msg)
                     if attempt == max_retries - 1:
                         raise e
 
-            if success and len(trans_lines) == len(current_chunk): # Successfully translated and line count matches
+            if success and len(trans_lines) in (len(current_chunk), len(current_chunk) - 1): # Successfully translated and line count matches or is 1 line fewer
                  translated_chunks.append(translated_text_for_this_chunk)
                  processed_chunk_index += 1
             elif success and (mid_point == 0 or len(current_chunk) == 1):
@@ -376,26 +341,6 @@ def translate_title_and_tags_local(original_title: str, model_path: str, n_ctx: 
                 else:
                     print(msg)
                 return ""
-        # else:
-        #     prompt = f"{system}\n\n{user}\n\n"
-        #     try:
-        #         resp = llm(
-        #             prompt=prompt,
-        #             max_tokens=max_tokens,
-        #             temperature=0.2,
-        #             top_p=0.9,
-        #             repeat_penalty=1.15,
-        #             stop=["<|im_end|>", "<|im_start|>", "USER:", "Assistant:"],
-        #             echo=False
-        #         )
-        #         return resp["choices"][0]["text"].strip()
-        #     except Exception as e:
-        #         msg = f"⚠️ 标题/标签生成异常 (Direct Completion): {e}"
-        #         if log_callback:
-        #             log_callback(msg)
-        #         else:
-        #             print(msg)
-        #         return ""
 
     try:
         # 1. 翻译标题

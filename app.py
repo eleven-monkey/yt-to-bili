@@ -1050,40 +1050,77 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
     print(f"调试信息：总共 {len(batched_paragraphs)} 个翻译分段")
 
     def translate_batch(batch, batch_index):
-        try:
-            print(f"调试信息：开始翻译分段 {batch_index}，内容长度: {len(batch)} 字符")
-            print(f"分段内容预览: {batch[:200]}...")
+        orig_lines = [l.strip() for l in batch.split('\n') if l.strip()]
+        max_retries = 3
+        last_result = ""
 
-            url = cfg_api_url
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg_api_key}"
-            }
-            payload = {
-                "model": cfg_model,
-                "messages": [
-                    {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
-                    {"role": "user", "content": batch}
-                ],
-                "stream": False,
-                "max_tokens": 4000
-            }
-            print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
-            response = requests.post(url, json=payload, headers=headers, timeout=60)
-            print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
-            response.raise_for_status()
-            result = response.json()
-            translated_content = result['choices'][0]['message']['content']
+        system_content = "你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。\n\n【绝对规则】\n1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。\n2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。\n3. 风格：中文口语化，通顺易懂。"
+        user_content = f"【待翻译文本】\n\n{batch}\n\n【翻译结果】："
 
-            # 清理不需要朗读的字符 / Clean characters not to be read
-            translated_content = translated_content.replace('&gt;', '').replace('>>', '').replace('& trash;', '').replace('[音乐]', '').replace('[笑声]', '')
+        for attempt in range(max_retries):
+            try:
+                print(f"调试信息：开始翻译分段 {batch_index}，重试次数 {attempt+1}/{max_retries}，内容长度: {len(batch)} 字符")
+                print(f"分段内容预览: {batch[:200]}...")
 
-            print(f"调试信息：分段 {batch_index} 翻译完成，返回内容长度: {len(translated_content)} 字符")
-            print(f"翻译内容预览: {translated_content[:200]}...")
-            return translated_content
-        except Exception as e:
-            print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
-            return f"Error: {str(e)}"
+                url = cfg_api_url
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {cfg_api_key}"
+                }
+                payload = {
+                    "model": cfg_model,
+                    "messages": [
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": user_content}
+                    ],
+                    "stream": False,
+                    "max_tokens": 4000,
+                    "temperature": 0.2
+                }
+                print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
+                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
+                response.raise_for_status()
+                result = response.json()
+                translated_content = result['choices'][0]['message']['content']
+
+                # 清理不需要的字符和标签 / Clean characters and noise tags
+                translated_content = re.sub(r'<\|im_end\|>|<\|im_start\|>', '', translated_content)
+                translated_content = re.sub(r'^[\s]*(我已了解|我已完全理解|好的|明白|Assistant:|翻译结果:)[^\n]*\n*', '', translated_content, flags=re.MULTILINE | re.IGNORECASE)
+                translated_content = re.sub(r'\[音乐\]|\[Music\]|\[笑声\]|\[Laughter\]|\[Applause\]|\[掌声\]', '', translated_content, flags=re.IGNORECASE)
+                translated_content = re.sub(r'\(Music\)|\(音乐\)|\(Laughter\)|\(笑声\)|\(Applause\)|\(掌声\)', '', translated_content, flags=re.IGNORECASE)
+                translated_content = translated_content.replace('&gt;', '').replace('>>', '').replace('& trash;', '')
+
+                # 自动修正时间戳中错误的冒号 and 位数错乱
+                translated_content = re.sub(r'\((\d+):(\d+):(\d+)[:.](\d+)\)',
+                                            lambda m: f"({int(m.group(1)):02d}:{int(m.group(2)):02d}:{int(m.group(3)):02d}.{m.group(4)})",
+                                            translated_content)
+
+                # 过滤出标准时间戳开头的有效行
+                trans_lines = []
+                timestamp_pattern = re.compile(r'^\(\d{2}:\d{2}:\d{2}\.\d{3}\)')
+                for line in translated_content.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if timestamp_pattern.match(line):
+                        trans_lines.append(line)
+
+                cleaned_result = "\n".join(trans_lines)
+                last_result = cleaned_result
+
+                if len(trans_lines) in (len(orig_lines), len(orig_lines) - 1):
+                    print(f"✅ 分段 {batch_index} 翻译校验成功！(行数: {len(trans_lines)}/{len(orig_lines)})")
+                    return cleaned_result
+                else:
+                    print(f"⚠️ 警告：分段 {batch_index} 有效译文行数 ({len(trans_lines)}) 与原文 ({len(orig_lines)}) 不符合要求，正在准备重试...")
+            except Exception as e:
+                print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
+                if attempt == max_retries - 1:
+                    return f"Error: {str(e)}"
+
+        print(f"❌ 分段 {batch_index} 经过 {max_retries} 次重试后仍未达到行数要求，使用最后的翻译结果。")
+        return last_result
 
     translated_results = {}
     with ThreadPoolExecutor(max_workers=cfg_max_workers) as executor:
