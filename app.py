@@ -134,7 +134,36 @@ def load_env_config():
             
     return config
 
+def load_models_config():
+    """
+    加载本地模型配置文件 models.json
+    """
+    config_file = os.path.join(os.getcwd(), "models.json")
+    default_config = {
+        "models": [
+            {
+                "name": "Hy-MT2-1.8B (默认)",
+                "repo": "tencent/Hy-MT2-1.8B-GGUF",
+                "file": "Hy-MT2-1.8B-Q4_K_M.gguf"
+            }
+        ],
+        "default_model": "Hy-MT2-1.8B (默认)"
+    }
+    
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                return config
+        except Exception as e:
+            print(f"读取 models.json 文件失败: {e}")
+            return default_config
+    else:
+        print(f"models.json 文件不存在，使用默认配置")
+        return default_config
+
 env_config = load_env_config()
+models_config = load_models_config()
 
 # --- 状态管理与后台任务相关 ---
 STATUS_FILE = "workflow_status.json"
@@ -223,7 +252,6 @@ class WorkflowManager:
         if current_status:
             current_status["is_running"] = False
             current_status["error"] = error_msg
-            current_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 发生错误: {error_msg}")
             WorkflowManager.save_status(temp_dir, current_status)
 
 def background_workflow_task(config):
@@ -330,12 +358,7 @@ def background_workflow_task(config):
                     ]
                 }
                 resp = requests.post(config['api_url'], json=payload, headers=headers, timeout=60)
-                if resp.status_code != 200:
-                    raise Exception(f"API标题翻译请求失败，状态码: {resp.status_code}，响应内容: {resp.text}")
-                resp_json = resp.json()
-                if 'choices' not in resp_json:
-                    raise KeyError(f"API标题翻译响应中未包含 'choices' 字段。完整响应: {resp_json}")
-                translated_title = resp_json['choices'][0]['message']['content'].replace('**', '').strip()
+                translated_title = resp.json()['choices'][0]['message']['content'].replace('**', '').strip()
                 
                 # 标签生成
                 tags_payload = {
@@ -346,12 +369,7 @@ def background_workflow_task(config):
                     ]
                 }
                 tags_resp = requests.post(config['api_url'], json=tags_payload, headers=headers, timeout=60)
-                if tags_resp.status_code != 200:
-                    raise Exception(f"API标签生成请求失败，状态码: {tags_resp.status_code}，响应内容: {tags_resp.text}")
-                tags_json = tags_resp.json()
-                if 'choices' not in tags_json:
-                    raise KeyError(f"API标签生成响应中未包含 'choices' 字段。完整响应: {tags_json}")
-                tags_str = tags_json['choices'][0]['message']['content']
+                tags_str = tags_resp.json()['choices'][0]['message']['content']
                 tags_list = [t.strip() for t in tags_str.replace('，', ',').split(',') if t.strip()][:10]
             
             # 保存上传配置
@@ -685,13 +703,6 @@ def background_workflow_task(config):
         if str(e) != "用户手动中止任务":
             err_msg += f"\n{traceback.format_exc()}"
             print(f"后台任务出错: {err_msg}")
-        
-        # 写入详细日志，以便 Streamlit 前台能看见具体报错堆栈
-        curr_status = WorkflowManager.load_status(temp_dir)
-        if curr_status:
-            curr_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 任务异常详情:\n{err_msg}")
-            WorkflowManager.save_status(temp_dir, curr_status)
-            
         WorkflowManager.mark_error(temp_dir, str(e))
 
 # --- 批量工作流相关 ---
@@ -886,15 +897,7 @@ def background_batch_workflow_task(batch_config):
 
     except Exception as e:
         import traceback
-        err_msg_batch = f"{str(e)}\n{traceback.format_exc()}"
-        print(f"批量任务出错: {err_msg_batch}")
-        
-        # 写入批量任务详细错误日志
-        curr_batch_status = BatchWorkflowManager.load_status(base_dir)
-        if curr_batch_status:
-            curr_batch_status["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 批量总任务异常详情:\n{err_msg_batch}")
-            BatchWorkflowManager.save_status(base_dir, curr_batch_status)
-            
+        print(f"批量任务出错: {e}\n{traceback.format_exc()}")
         BatchWorkflowManager.mark_error(base_dir, str(e))
 
 def clear_temp_directory():
@@ -1076,77 +1079,40 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
     print(f"调试信息：总共 {len(batched_paragraphs)} 个翻译分段")
 
     def translate_batch(batch, batch_index):
-        orig_lines = [l.strip() for l in batch.split('\n') if l.strip()]
-        max_retries = 3
-        last_result = ""
+        try:
+            print(f"调试信息：开始翻译分段 {batch_index}，内容长度: {len(batch)} 字符")
+            print(f"分段内容预览: {batch[:200]}...")
 
-        system_content = "你是一个严格的字幕翻译引擎。你的唯一任务是翻译，绝对不要输出任何对话、问候、确认（如“好的”、“我明白了”）或解释性文字。\n\n【绝对规则】\n1. 逐行对应，强制保持行数一致：原文几行，译文就几行。禁止合并、总结或遗漏。\n2. 时间戳：每一行必须以精确的 (HH:MM:SS.mmm) 格式开头。严禁修改时间戳的数字位数或标点（严禁将 . 写成 :）。\n3. 风格：中文口语化，通顺易懂。"
-        user_content = f"【待翻译文本】\n\n{batch}\n\n【翻译结果】："
+            url = cfg_api_url
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {cfg_api_key}"
+            }
+            payload = {
+                "model": cfg_model,
+                "messages": [
+                    {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
+                    {"role": "user", "content": batch}
+                ],
+                "stream": False,
+                "max_tokens": 4000
+            }
+            print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
+            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
+            response.raise_for_status()
+            result = response.json()
+            translated_content = result['choices'][0]['message']['content']
 
-        for attempt in range(max_retries):
-            try:
-                print(f"调试信息：开始翻译分段 {batch_index}，重试次数 {attempt+1}/{max_retries}，内容长度: {len(batch)} 字符")
-                print(f"分段内容预览: {batch[:200]}...")
+            # 清理不需要朗读的字符 / Clean characters not to be read
+            translated_content = translated_content.replace('&gt;', '').replace('>>', '').replace('& trash;', '').replace('[音乐]', '').replace('[笑声]', '')
 
-                url = cfg_api_url
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {cfg_api_key}"
-                }
-                payload = {
-                    "model": cfg_model,
-                    "messages": [
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": user_content}
-                    ],
-                    "stream": False,
-                    "max_tokens": 4000,
-                    "temperature": 0.2
-                }
-                print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
-                response = requests.post(url, json=payload, headers=headers, timeout=60)
-                print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
-                response.raise_for_status()
-                result = response.json()
-                translated_content = result['choices'][0]['message']['content']
-
-                # 清理不需要的字符和标签 / Clean characters and noise tags
-                translated_content = re.sub(r'<\|im_end\|>|<\|im_start\|>', '', translated_content)
-                translated_content = re.sub(r'^[\s]*(我已了解|我已完全理解|好的|明白|Assistant:|翻译结果:)[^\n]*\n*', '', translated_content, flags=re.MULTILINE | re.IGNORECASE)
-                translated_content = re.sub(r'\[音乐\]|\[Music\]|\[笑声\]|\[Laughter\]|\[Applause\]|\[掌声\]', '', translated_content, flags=re.IGNORECASE)
-                translated_content = re.sub(r'\(Music\)|\(音乐\)|\(Laughter\)|\(笑声\)|\(Applause\)|\(掌声\)', '', translated_content, flags=re.IGNORECASE)
-                translated_content = translated_content.replace('&gt;', '').replace('>>', '').replace('& trash;', '')
-
-                # 自动修正时间戳中错误的冒号 and 位数错乱
-                translated_content = re.sub(r'\((\d+):(\d+):(\d+)[:.](\d+)\)',
-                                            lambda m: f"({int(m.group(1)):02d}:{int(m.group(2)):02d}:{int(m.group(3)):02d}.{m.group(4)})",
-                                            translated_content)
-
-                # 过滤出标准时间戳开头的有效行
-                trans_lines = []
-                timestamp_pattern = re.compile(r'^\(\d{2}:\d{2}:\d{2}\.\d{3}\)')
-                for line in translated_content.split('\n'):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if timestamp_pattern.match(line):
-                        trans_lines.append(line)
-
-                cleaned_result = "\n".join(trans_lines)
-                last_result = cleaned_result
-
-                if len(trans_lines) in (len(orig_lines), len(orig_lines) - 1):
-                    print(f"✅ 分段 {batch_index} 翻译校验成功！(行数: {len(trans_lines)}/{len(orig_lines)})")
-                    return cleaned_result
-                else:
-                    print(f"⚠️ 警告：分段 {batch_index} 有效译文行数 ({len(trans_lines)}) 与原文 ({len(orig_lines)}) 不符合要求，正在准备重试...")
-            except Exception as e:
-                print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
-                if attempt == max_retries - 1:
-                    return f"Error: {str(e)}"
-
-        print(f"❌ 分段 {batch_index} 经过 {max_retries} 次重试后仍未达到行数要求，使用最后的翻译结果。")
-        return last_result
+            print(f"调试信息：分段 {batch_index} 翻译完成，返回内容长度: {len(translated_content)} 字符")
+            print(f"翻译内容预览: {translated_content[:200]}...")
+            return translated_content
+        except Exception as e:
+            print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
+            return f"Error: {str(e)}"
 
     translated_results = {}
     with ThreadPoolExecutor(max_workers=cfg_max_workers) as executor:
@@ -1270,7 +1236,7 @@ VOICE_ALIAS_MAP = {
 VOICE_ALIAS_REVERSE = {v: k for k, v in VOICE_ALIAS_MAP.items()}
 SELECTED_VOICE = st.sidebar.selectbox("TTS语音角色", options=VOICE_CHOICES, index=1, key="selected_voice")
 
-MAX_WORKERS = st.sidebar.slider("在线API并发数", min_value=1, max_value=20, value=10, help="同时向翻译API发起请求的并发线程数")
+MAX_WORKERS = st.sidebar.slider("翻译并发数", min_value=1, max_value=20, value=10, help="同时翻译的段落数量")
 SEGMENT_SIZE = st.sidebar.slider("翻译分段大小", min_value=1, max_value=20, value=11, help="每次翻译包含的段落数量")
 
 st.sidebar.markdown("---")
@@ -1282,8 +1248,24 @@ if USE_LOCAL_MODEL:
     if not has_dep:
         st.sidebar.error(dep_msg)
     
-    LOCAL_MODEL_REPO = st.sidebar.text_input("GGUF 仓库 ID", value="tencent/Hy-MT2-1.8B-GGUF", help="Hugging Face 上的 GGUF 仓库")
-    LOCAL_MODEL_FILE = st.sidebar.text_input("GGUF 文件名", value="Hy-MT2-1.8B-Q4_K_M.gguf", help="GGUF 模型文件名")
+    # 从配置文件读取模型列表
+    model_list = models_config.get("models", [])
+    model_names = [m["name"] for m in model_list]
+    default_model_name = models_config.get("default_model", "")
+    default_index = model_names.index(default_model_name) if default_model_name in model_names else 0
+    
+    # 模型选择下拉菜单
+    selected_model_name = st.sidebar.selectbox("选择本地模型", model_names, index=default_index, help="从 models.json 配置文件读取模型列表")
+    
+    # 获取选中模型的仓库和文件
+    LOCAL_MODEL_REPO = ""
+    LOCAL_MODEL_FILE = ""
+    for m in model_list:
+        if m["name"] == selected_model_name:
+            LOCAL_MODEL_REPO = m["repo"]
+            LOCAL_MODEL_FILE = m["file"]
+            break
+    
     LOCAL_DEVICE = st.sidebar.selectbox("本地模型运行设备", ["GPU (自动显卡加速)", "CPU (仅使用处理器)"], index=0)
     if LOCAL_DEVICE == "GPU (自动显卡加速)":
         LOCAL_GPU_LAYERS = st.sidebar.number_input("GPU 运行层数 (-1为全部)", value=-1, step=1)
@@ -1293,8 +1275,14 @@ if USE_LOCAL_MODEL:
     LOCAL_CHUNK_SIZE = st.sidebar.slider("本地单次翻译行数", min_value=1, max_value=30, value=10)
     LOCAL_TERMINOLOGY = st.sidebar.text_area("本地模型术语表 (原词=译词，一行一个)", value="", help="示例:\nLoheed=洛克希德\nXF104=XF-104")
 else:
-    LOCAL_MODEL_REPO = "tencent/Hy-MT2-1.8B-GGUF"
-    LOCAL_MODEL_FILE = "Hy-MT2-1.8B-Q4_K_M.gguf"
+    # 获取默认模型的仓库和文件
+    default_models = [m for m in models_config.get("models", []) if m["name"] == models_config.get("default_model", "")]
+    if default_models:
+        LOCAL_MODEL_REPO = default_models[0]["repo"]
+        LOCAL_MODEL_FILE = default_models[0]["file"]
+    else:
+        LOCAL_MODEL_REPO = "tencent/Hy-MT2-1.8B-GGUF"
+        LOCAL_MODEL_FILE = "Hy-MT2-1.8B-Q4_K_M.gguf"
     LOCAL_GPU_LAYERS = -1
     LOCAL_N_CTX = 8192
     LOCAL_CHUNK_SIZE = 10
@@ -1987,15 +1975,95 @@ with tab1:
                             st.success("本地模型翻译完成！")
                             st.info(f"输出文件: {output_translated_file}")
                         else:
-                            output_translated_file = translate_subtitles_from_vtt(vtt_file_path, api_config={
-                                "API_URL": API_URL,
-                                "API_KEY": API_KEY,
-                                "MODEL_NAME": MODEL_NAME,
-                                "MAX_WORKERS": MAX_WORKERS,
-                                "SEGMENT_SIZE": SEGMENT_SIZE,
-                                "use_local_model": False
-                            })
-                            st.success("API 翻译完成！")
+                            paragraphs = [line.strip() for line in open(output_txt_file, 'r', encoding='utf-8') if line.strip()]
+                            
+                            print(f"调试信息：读取到 {len(paragraphs)} 个段落")
+                            
+                            batched_paragraphs = []
+                            current_batch = []
+                            current_char_count = 0
+                            
+                            for i, paragraph in enumerate(paragraphs):
+                                paragraph_char_count = len(paragraph)
+                                if (len(current_batch) >= SEGMENT_SIZE) or (current_char_count + paragraph_char_count > 2000 and current_batch):
+                                    batched_paragraphs.append("\n".join(current_batch))
+                                    print(f"调试信息：分段 {len(batched_paragraphs)} 包含 {len(current_batch)} 个段落，共 {current_char_count} 字符")
+                                    current_batch = [paragraph]
+                                    current_char_count = paragraph_char_count
+                                else:
+                                    current_batch.append(paragraph)
+                                    current_char_count += paragraph_char_count
+                            
+                            if current_batch:
+                                batched_paragraphs.append("\n".join(current_batch))
+                                print(f"调试信息：最后一个分段 {len(batched_paragraphs)} 包含 {len(current_batch)} 个段落，共 {current_char_count} 字符")
+                            
+                            print(f"调试信息：总共 {len(batched_paragraphs)} 个翻译分段")
+                            
+                            def translate_batch(batch, batch_index):
+                                try:
+                                    print(f"调试信息：开始翻译分段 {batch_index}，内容长度: {len(batch)} 字符")
+                                    print(f"分段内容预览: {batch[:200]}...")
+                                    
+                                    url = API_URL
+                                    headers = {
+                                        "Content-Type": "application/json",
+                                        "Authorization": f"Bearer {API_KEY}"
+                                    }
+                                    payload = {
+                                        "model": MODEL_NAME,
+                                        "messages": [
+                                            {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
+                                            {"role": "user", "content": batch}
+                                        ],
+                                        "stream": False,
+                                        "max_tokens": 4000
+                                    }
+                                    print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
+                                    response = requests.post(url, json=payload, headers=headers, timeout=60)
+                                    print(f"调试信息：分段 {batch_index} API响应状态码: {response.status_code}")
+                                    response.raise_for_status()
+                                    result = response.json()
+                                    translated_content = result['choices'][0]['message']['content']
+                                    print(f"调试信息：分段 {batch_index} 翻译结果长度: {len(translated_content)} 字符")
+                                    print(f"翻译结果预览: {translated_content[:200]}...")
+                                    return translated_content
+                                except Exception as e:
+                                    print(f"调试信息：分段 {batch_index} 翻译失败: {str(e)}")
+                                    import traceback
+                                    print(f"调试信息：分段 {batch_index} 错误详情: {traceback.format_exc()}")
+                                    return f"Error: {str(e)}"
+                            
+                            translated_results = {}
+                            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                                futures = {executor.submit(translate_batch, batch, i): i for i, batch in enumerate(batched_paragraphs)}
+                                
+                                progress_bar = st.progress(0)
+                                completed = 0
+                                for future in as_completed(futures):
+                                    index = futures[future]
+                                    result = future.result()
+                                    if not result.startswith("Error:"):
+                                        translated_results[index] = result
+                                    completed += 1
+                                    progress_bar.progress(completed / len(batched_paragraphs))
+                            
+                            translated_paragraphs = []
+                            failed_count = 0
+                            
+                            for i in range(len(batched_paragraphs)):
+                                if i in translated_results:
+                                    translated_paragraphs.append(translated_results[i])
+                                else:
+                                    failed_count += 1
+                            
+                            output_translated_file = os.path.splitext(vtt_file_path)[0] + "_translated.txt"
+                            with open(output_translated_file, 'w', encoding='utf-8') as f:
+                                for seg in translated_paragraphs:
+                                    cleaned = seg.replace('&gt;', '').replace('>>', '').replace('&trash;', '').replace('> ', '').replace('&nbsp;', '').replace('_', '').replace('＞', '').replace('[音乐]', '')
+                                    f.write(cleaned + "\n\n")
+                            
+                            st.success(f"翻译完成！成功: {len(translated_paragraphs)} 段落，失败: {failed_count}")
                             st.info(f"输出文件: {output_translated_file}")
                         
                     except Exception as e:

@@ -1,0 +1,25 @@
+{
+  "models": [
+    {
+      "name": "Hy-MT2-1.8B (默认)",
+      "repo": "tencent/Hy-MT2-1.8B-GGUF",
+      "file": "Hy-MT2-1.8B-Q4_K_M.gguf"
+    },
+    {
+      "name": "Hy-MT2-1.8B-Q8",
+      "repo": "tencent/Hy-MT2-1.8B-GGUF",
+      "file": "Hy-MT2-1.8B-Q8_0.gguf"
+    },
+    {
+      "name": "Qwen2-1.5B",
+      "repo": "Qwen/Qwen2-1.5B-GGUF",
+      "file": "qwen2-1.5b-q4_k_m.gguf"
+    },
+    {
+      "name": "GLM-4-9B",
+      "repo": "THUDM/glm-4-9b-chat-gguf",
+      "file": "glm-4-9b-chat-q4_k_m.gguf"
+    }
+  ],
+  "default_model": "Hy-MT2-1.8B (默认)"
+}
