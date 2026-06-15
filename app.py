@@ -165,6 +165,36 @@ def load_models_config():
 env_config = load_env_config()
 models_config = load_models_config()
 
+def load_api_configs():
+    """
+    动态加载所有 API 配置组
+    检测 MODEL_NAME, MODEL_NAME_1, MODEL_NAME_2... 有多少组就返回多少
+    """
+    configs = []
+    suffixes = [""] + [f"_{i}" for i in range(1, 20)]  # 支持最多20组
+    
+    for suffix in suffixes:
+        model_key = f"MODEL_NAME{suffix}"
+        api_key_key = f"API_KEY{suffix}"
+        api_url_key = f"API_URL{suffix}"
+        
+        model_name = env_config.get(model_key, "")
+        if not model_name:
+            break  # 不存在时停止
+        
+        api_key = env_config.get(api_key_key, "")
+        api_url = env_config.get(api_url_key, "https://api.siliconflow.cn/v1/chat/completions")
+        
+        configs.append({
+            "name": model_name,
+            "api_key": api_key,
+            "api_url": api_url
+        })
+    
+    return configs
+
+api_configs = load_api_configs()
+
 # --- 状态管理与后台任务相关 ---
 STATUS_FILE = "workflow_status.json"
 
@@ -1217,9 +1247,20 @@ st.markdown("---")
 
 st.sidebar.header("⚙️ 配置")
 
-API_URL = st.sidebar.text_input("API URL", value=env_config.get("API_URL", "https://api.siliconflow.cn/v1/chat/completions"), help="翻译API的URL", key="api_url")
-API_KEY = st.sidebar.text_input("API Key", type="password", value=env_config.get("API_KEY", ""), help="翻译API的Key（将在运行时从环境变量读取）", key="api_key")
-MODEL_NAME = st.sidebar.text_input("模型名称", value=env_config.get("MODEL_NAME", "THUDM/GLM-4-9B-0414"), help="翻译使用的模型名称", key="model_name")
+# 从 api_configs 动态生成模型选择
+if api_configs:
+    model_names = [c["name"] for c in api_configs]
+    selected_model = st.sidebar.selectbox("翻译模型", model_names, help="选择翻译模型（从 Colab Secrets 读取配置）")
+    # 找到选中的配置
+    selected_config = next(c for c in api_configs if c["name"] == selected_model)
+    MODEL_NAME = selected_config["name"]
+    API_KEY = selected_config["api_key"]
+    API_URL = selected_config["api_url"]
+else:
+    # 没有配置时显示输入框
+    API_URL = st.sidebar.text_input("API URL", value="https://api.siliconflow.cn/v1/chat/completions", help="翻译API的URL", key="api_url")
+    API_KEY = st.sidebar.text_input("API Key", type="password", help="翻译API的Key", key="api_key")
+    MODEL_NAME = st.sidebar.text_input("模型名称", help="翻译使用的模型名称", key="model_name")
 
 BILI_SESSDATA = st.sidebar.text_area("B站Cookie", value=env_config.get("BILI_SESSDATA", ""), help="B站的sessdata（用于上传）", height=100, key="bili_sessdata")
 BILI_ACCESS_KEY_ID = st.sidebar.text_input("B站Access Key ID", value=env_config.get("BILI_ACCESS_KEY_ID", ""), help="B站的access_key_id", key="bili_access_key_id")
