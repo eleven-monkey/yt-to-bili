@@ -121,6 +121,10 @@ def load_env_config():
         "BILI_ACCESS_KEY_ID", "BILI_ACCESS_KEY_SECRET"
     ]
     
+    # 添加额外的模型配置项 (MODEL_NAME_1, API_KEY_1, API_URL_1 等)
+    for i in range(1, 20):
+        target_keys.extend([f"MODEL_NAME_{i}", f"API_KEY_{i}", f"API_URL_{i}"])
+    
     for key in target_keys:
         env_val = os.getenv(key)
         if env_val:
