@@ -557,7 +557,7 @@ def background_workflow_task(config):
             print("开始B站上传流程", flush=True)
             print("=" * 50, flush=True)
             
-            credential = Credential(sessdata=config['bili_sess'], bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26")
+            credential = Credential(sessdata=config['bili_sess'], bili_jct=config['bili_jct'])
             vu_meta = VideoMeta(
                 tid=130, title=translated_title, tags=tags_list,
                 desc=translated_title, cover=cover_path, no_reprint=True
@@ -864,6 +864,7 @@ def background_batch_workflow_task(batch_config):
                 "api_key": batch_config['api_key'],
                 "model_name": batch_config['model_name'],
                 "bili_sess": batch_config['bili_sess'],
+                "bili_jct": batch_config.get('bili_jct', ''),
                 "bili_ak": batch_config.get('bili_ak', ''),
                 "bili_sk": batch_config.get('bili_sk', ''),
                 "yt_cookies": batch_config.get('yt_cookies', ''),
@@ -1439,6 +1440,7 @@ with tab0:
                     "api_key": API_KEY,
                     "model_name": MODEL_NAME,
                     "bili_sess": BILI_SESSDATA,
+                    "bili_jct": env_config.get("BILI_BILI_JCT", ""),
                     "bili_ak": BILI_ACCESS_KEY_ID, # 虽然代码里暂时没用AK/SK上传，但保留配置
                     "bili_sk": BILI_ACCESS_KEY_SECRET,
                     "yt_cookies": YT_COOKIES,
@@ -1667,6 +1669,7 @@ with tab8:
                     "api_key": API_KEY,
                     "model_name": MODEL_NAME,
                     "bili_sess": BILI_SESSDATA,
+                    "bili_jct": env_config.get("BILI_BILI_JCT", ""),
                     "bili_ak": BILI_ACCESS_KEY_ID,
                     "bili_sk": BILI_ACCESS_KEY_SECRET,
                     "yt_cookies": YT_COOKIES,
@@ -2326,7 +2329,7 @@ with tab1:
                     try:
                         credential = Credential(
                             sessdata=BILI_SESSDATA,
-                            bili_jct="bcd4ba0d9ab8a7b95485798ed8097d26"
+                            bili_jct=env_config.get("BILI_BILI_JCT", "")
                         )
                         
                         vu_meta = VideoMeta(
