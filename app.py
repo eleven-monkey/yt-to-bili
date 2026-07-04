@@ -737,7 +737,7 @@ def background_workflow_task(config):
         if str(e) != "用户手动中止任务":
             err_msg += f"\n{traceback.format_exc()}"
             print(f"后台任务出错: {err_msg}")
-        WorkflowManager.mark_error(temp_dir, str(e))
+        WorkflowManager.mark_error(temp_dir, err_msg)
 
 # --- 批量工作流相关 ---
 BATCH_STATUS_FILE = "batch_status.json"
@@ -932,8 +932,9 @@ def background_batch_workflow_task(batch_config):
 
     except Exception as e:
         import traceback
-        print(f"批量任务出错: {e}\n{traceback.format_exc()}")
-        BatchWorkflowManager.mark_error(base_dir, str(e))
+        full_err = f"{e}\n{traceback.format_exc()}"
+        print(f"批量任务出错: {full_err}")
+        BatchWorkflowManager.mark_error(base_dir, full_err)
 
 def clear_temp_directory():
     """清空temp目录下的所有内容"""
@@ -1126,11 +1127,12 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             payload = {
                 "model": cfg_model,
                 "messages": [
-                    {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
+                    {"role": "system", "content": "# Role: 专业字幕翻译官\n\n## 任务\n将外文字幕翻译为中文，严格保留每行的格式。\n\n## 格式要求（极其重要）\n每行必须严格保持如下格式，不得改变时间戳：\n(HH:MM:SS.mmm) 中文译文\n\n## 规则\n1. 时间戳 (HH:MM:SS.mmm) 必须原样保留，不得修改数字、格式或符号。\n2. 只翻译时间戳之后的正文内容为中文。\n3. 每行的时间戳与原文一一对应，不得合并、拆分或调换顺序。\n4. 准确传达原意，译文符合中文表达习惯，通顺自然。\n5. 不要添加任何解释性文字、注释或说明。\n6. 保持原文的语气风格，（如风趣幽默、严肃中立等）。"},
                     {"role": "user", "content": batch}
                 ],
                 "stream": False,
-                "max_tokens": 4000
+                "max_tokens": 4000,
+                "temperature": 0.3
             }
             print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
             response = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -1882,6 +1884,8 @@ with tab1:
                         
                 except Exception as e:
                     st.error(f"下载失败: {str(e)}")
+                    with st.expander("🔍 查看详细错误信息"):
+                        st.code(traceback.format_exc(), language="python")
     
     vtt_file = os.path.join(TEMP_DIR, "subtitles", "word_level.vtt")
     
@@ -2061,11 +2065,12 @@ with tab1:
                                     payload = {
                                         "model": MODEL_NAME,
                                         "messages": [
-                                            {"role": "system", "content": "# Role: 专业翻译官\n\n## Profile\n- author: LangGPT优化中心\n- version: 2.1\n- language: 中英双语\n- description: 专注于文本精准转换的AI翻译专家，擅长处理技术文档和日常对话场景\n\n## Background\n用户在跨国协作、技术文档处理、社交媒体互动等场景中，需要将外文内容准确转化为中文，同时保持特殊格式元素完整\n\n## Skills\n1. 多语言文本解析与重构能力\n2. 时间戳识别与格式保留技术\n3. 语义通顺度校验算法\n4. 格式控制与冗余内容过滤\n\n## Goals\n1. 实现原文语义的精准转换\n2. 保持时间戳等特殊格式元素\n3. 确保输出结果自然流畅\n4. 排除非翻译内容添加\n\n## Constraints\n1. 禁止添加解释性文字\n2. 禁用注释或说明性符号\n3. 保留原始时间戳格式（如(12:34））\n4. 不处理非文本元素（如图片/表格）\n5. 禁止使用工具调用（tool_calls）功能，禁止调用外部翻译api进行翻译\n\n## Workflow\n1. 接收输入内容，检测语言类型\n2. 识别并标记特殊格式元素\n3. 执行语义转换：\n   - 日常用语：采用口语化表达\n   - 技术术语：使用标准化译法\n5. 输出纯翻译结果\n\n## OutputFormat\n仅返回符合以下要求的翻译文本：\n1. 中文书面语表达\n2. 保留原始段落结构\n3. 时间戳保持(MM:SS)或(HH:MM:SS)格式\n4. 无任何附加符号或说明\n4. 尽量只要中文，不要中英文夹杂。"},
+                                            {"role": "system", "content": "# Role: 专业字幕翻译官\n\n## 任务\n将外文字幕翻译为中文，严格保留每行的格式。\n\n## 格式要求（极其重要）\n每行必须严格保持如下格式，不得改变时间戳：\n(HH:MM:SS.mmm) 中文译文\n\n## 规则\n1. 时间戳 (HH:MM:SS.mmm) 必须原样保留，不得修改数字、格式或符号。\n2. 只翻译时间戳之后的正文内容为中文。\n3. 每行的时间戳与原文一一对应，不得合并、拆分或调换顺序。\n4. 准确传达原意，译文符合中文表达习惯，通顺自然。\n5. 不要添加任何解释性文字、注释或说明。\n6. 保持原文的语气风格，（如风趣幽默、严肃中立等）。"},
                                             {"role": "user", "content": batch}
                                         ],
                                         "stream": False,
-                                        "max_tokens": 4000
+                                        "max_tokens": 4000,
+                                        "temperature": 0.3
                                     }
                                     print(f"调试信息：分段 {batch_index} 发送API请求到 {url}")
                                     response = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -2116,6 +2121,8 @@ with tab1:
                         
                     except Exception as e:
                         st.error(f"翻译失败: {str(e)}")
+                        with st.expander("🔍 查看详细错误信息"):
+                            st.code(traceback.format_exc(), language="python")
     
     txt_file = os.path.join(TEMP_DIR, "subtitles", os.path.splitext(os.path.basename(vtt_file))[0] + "_translated.txt")
     mp3_file = os.path.join(TEMP_DIR, "subtitles", os.path.splitext(os.path.basename(vtt_file))[0] + "_translated.mp3")
@@ -2142,6 +2149,8 @@ with tab1:
                             st.error("没有成功生成音频文件")
                     except Exception as e:
                         st.error(f"转换失败: {str(e)}")
+                        with st.expander("🔍 查看详细错误信息"):
+                            st.code(traceback.format_exc(), language="python")
     
     mp3_file = os.path.join(TEMP_DIR, "subtitles", os.path.splitext(os.path.basename(vtt_file))[0] + "_translated.mp3")
     
@@ -2224,6 +2233,8 @@ with tab1:
                                 st.success(f"已保存视频文件到: {manual_video_path}")
                         else:
                             st.error(f"下载失败: {str(e)}")
+                            with st.expander("🔍 查看详细错误信息"):
+                                st.code(traceback.format_exc(), language="python")
     
     final_video = os.path.splitext(mp3_file)[0] + ".mp4"
     
@@ -2280,6 +2291,8 @@ with tab1:
                             st.info(f"输出文件: {output_path}")
                     except Exception as e:
                         st.error(f"封面处理失败: {str(e)}")
+                        with st.expander("🔍 查看详细错误信息"):
+                            st.code(traceback.format_exc(), language="python")
     
     cover_file = os.path.join(TEMP_DIR, "subtitles", "cover.jpeg")
     
@@ -2326,6 +2339,8 @@ with tab1:
                             st.error("剪辑失败")
                     except Exception as e:
                         st.error(f"剪辑失败: {str(e)}")
+                        with st.expander("🔍 查看详细错误信息"):
+                            st.code(traceback.format_exc(), language="python")
         else:
             st.info("剪辑未启用，跳过")
     
@@ -2407,10 +2422,8 @@ with tab1:
                     except Exception as e:
                         import traceback
                         st.error(f"上传失败: {str(e)}")
-                        st.markdown("### 调试信息")
-                        st.text(f"错误类型: {type(e).__name__}")
-                        st.text(f"完整错误: {repr(e)}")
-                        st.text(f"Traceback:\n{traceback.format_exc()}")
+                        with st.expander("🔍 查看详细错误信息"):
+                            st.code(traceback.format_exc(), language="python")
                         
                         st.markdown("### 配置检查")
                         st.text(f"BILI_SESSDATA: {'已设置' if BILI_SESSDATA else '未设置'} (长度: {len(BILI_SESSDATA)})")
