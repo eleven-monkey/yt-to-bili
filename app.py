@@ -1058,6 +1058,81 @@ def validate_and_clean_translation(translated_content, original_batch, batch_ind
     return cleaned, True, None
 
 
+# ---- 本地 LLM 兜底翻译（用于 API 失败时 fallback）----
+_LLM = None
+_LLM_LOCK = threading.Lock()
+_LLM_INFER_LOCK = threading.Lock()
+
+
+def _get_local_llm():
+    """懒加载本地 llama-cpp-python 模型（线程安全单例）。
+    加载失败返回 None。
+    """
+    global _LLM
+    if _LLM is not None:
+        return _LLM
+    with _LLM_LOCK:
+        if _LLM is not None:
+            return _LLM
+        try:
+            from llama_cpp import Llama
+        except ImportError as e:
+            print(f"[本地LLM] 缺少 llama-cpp-python（{e}），无法启用本地兜底。请安装：\n"
+                  f"  pip install llama-cpp-python --no-cache-dir "
+                  f"--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
+                  f"  pip install huggingface_hub")
+            return None
+        try:
+            from huggingface_hub import hf_hub_download
+            print(f"[本地LLM] 正在下载/加载 Hy-MT2-1.8B-Q4_K_M.gguf ...")
+            model_path = hf_hub_download(
+                repo_id="tencent/Hy-MT2-1.8B-GGUF",
+                filename="Hy-MT2-1.8B-Q4_K_M.gguf"
+            )
+            _LLM = Llama(
+                model_path=model_path,
+                n_ctx=4096,
+                n_threads=max(1, (os.cpu_count() or 2) // 2),
+                verbose=False,
+            )
+            print("[本地LLM] 加载完成")
+        except Exception as e:
+            print(f"[本地LLM] 加载失败: {e}")
+            return None
+    return _LLM
+
+
+def _translate_with_local_llm(batch_text):
+    """使用本地 llama 模型翻译单个分段。成功返回洗净后的译文文本，失败返回 None。"""
+    llm = _get_local_llm()
+    if llm is None:
+        return None
+    try:
+        with _LLM_INFER_LOCK:
+            resp = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+                    {"role": "user", "content": batch_text},
+                ],
+                max_tokens=4000,
+                temperature=0.3,
+                top_p=0.7,
+            )
+        content = resp["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[本地LLM] 翻译出错: {e}")
+        return None
+
+    if not content:
+        return None
+    content = content.replace('&gt;', '').replace('>>', '').replace('& trash;', '').replace('[音乐]', '').replace('[笑声]', '')
+    cleaned, is_valid, error_msg = validate_and_clean_translation(content, batch_text)
+    if is_valid:
+        return cleaned
+    print(f"[本地LLM] 校验失败: {error_msg}")
+    return None
+
+
 def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
     """从VTT文件翻译字幕，生成带时间戳的文本文件（单步执行的完整逻辑）"""
     # 获取配置，如果未提供则使用全局变量
@@ -1221,6 +1296,9 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
         max_retries = 3
         user_content = batch
         last_error = None
+        cleaned = ""
+        fallback_to_local = False
+
         for attempt in range(1, max_retries + 1):
             try:
                 print(f"调试信息：开始翻译分段 {batch_index}（第 {attempt}/{max_retries} 次），内容长度: {len(batch)} 字符")
@@ -1270,16 +1348,44 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
                     )
                     time.sleep(1)
                     continue
-                # 达到最大重试次数，返回当前清洗结果（若有有效行）
-                print(f"调试信息：分段 {batch_index} 重试 {max_retries} 次仍未通过校验，保留当前结果")
-                return cleaned if cleaned else f"Error: {last_error}"
+                # 达到最大重试次数，后续走本地兜底
+                fallback_to_local = True
+                break
+
+            except requests.exceptions.HTTPError as http_err:
+                status_code = response.status_code
+                print(f"调试信息：分段 {batch_index} HTTP错误（第 {attempt} 次）: {status_code}")
+                # 5xx：服务端错误，立即停止重试，转本地兜底
+                if 500 <= status_code < 600:
+                    print(f"调试信息：分段 {batch_index} 服务端错误 {status_code}，立即转本地模型兜底")
+                    fallback_to_local = True
+                    last_error = f"HTTP {status_code}"
+                    break
+                last_error = f"HTTP {status_code}: {http_err}"
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                break
+
             except Exception as e:
                 print(f"调试信息：分段 {batch_index} 第 {attempt} 次异常: {traceback.format_exc()}")
                 last_error = str(e)
                 if attempt < max_retries:
                     time.sleep(1)
                     continue
-                return f"Error: {last_error}"
+                break
+
+        # ---- 本地 LLM 兜底 ----
+        if fallback_to_local or not cleaned:
+            print(f"调试信息：分段 {batch_index} 尝试本地模型兜底翻译")
+            local_result = _translate_with_local_llm(batch)
+            if local_result:
+                print(f"调试信息：分段 {batch_index} 本地模型兜底成功")
+                return local_result
+            print(f"调试信息：分段 {batch_index} 本地模型兜底失败")
+
+        if cleaned:
+            return cleaned
         return f"Error: {last_error or '未知错误'}"
 
     translated_results = {}
