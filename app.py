@@ -23,6 +23,7 @@ import yt_dlp
 import requests
 
 from src.local_translator import check_dependencies, download_model, translate_subtitle_file, translate_title_and_tags_local
+from src.speech_rate_optimizer import optimize_speaking_rate_in_file
 
 # ---- 缩写识别：末尾句点不应触发断句 ----
 # 1) 首字母缩写型：U.S.A. / L.I. / U.S. / A.B.C.（单大写字母+句点重复，整词无小写字母）
@@ -1188,6 +1189,7 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             n_gpu_layers=cfg_local_gpu,
             log_callback=cfg_log_callback
         )
+        optimize_speaking_rate_in_file(final_output_file, log_callback=cfg_log_callback)
         return final_output_file
 
     paragraphs = [line.strip() for line in open(output_txt_file, 'r', encoding='utf-8') if line.strip()]
@@ -1307,6 +1309,8 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             f.write(para + "\n\n")
 
     print(f"翻译完成，保存到: {final_output_file}")
+    _api_log_cb = api_config.get("log_callback", None) if api_config else None
+    optimize_speaking_rate_in_file(final_output_file, log_callback=_api_log_cb)
     return final_output_file
 
 # TTS 相关函数已移至 worker_utils.py
@@ -2155,6 +2159,7 @@ with tab1:
                                 n_gpu_layers=LOCAL_GPU_LAYERS,
                                 log_callback=log_to_ui
                             )
+                            optimize_speaking_rate_in_file(output_translated_file, log_callback=log_to_ui)
                             st.success("本地模型翻译完成！")
                             st.info(f"输出文件: {output_translated_file}")
                         else:
