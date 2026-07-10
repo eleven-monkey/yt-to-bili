@@ -1355,12 +1355,6 @@ def translate_subtitles_from_vtt(vtt_file_path, api_config=None):
             except requests.exceptions.HTTPError as http_err:
                 status_code = response.status_code
                 print(f"调试信息：分段 {batch_index} HTTP错误（第 {attempt} 次）: {status_code}")
-                # 5xx：服务端错误，立即停止重试，转本地兜底
-                if 500 <= status_code < 600:
-                    print(f"调试信息：分段 {batch_index} 服务端错误 {status_code}，立即转本地模型兜底")
-                    fallback_to_local = True
-                    last_error = f"HTTP {status_code}"
-                    break
                 last_error = f"HTTP {status_code}: {http_err}"
                 if attempt < max_retries:
                     time.sleep(1)
