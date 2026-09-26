@@ -62,11 +62,14 @@ def update_yt_dlp():
     try:
         print("正在检查并更新 yt-dlp...")
         # 使用 pip 更新 yt-dlp
+        # 必须同时装 curl_cffi：它是 yt-dlp 的 impersonation 依赖。
+        # 新版 YouTube extractor 会给每条字幕 URL 打上 impersonate=True，
+        # 缺少 curl_cffi 时无法模拟浏览器 TLS 指纹，字幕接口会直接返回 429。
         result = subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'],
+            [sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp', 'curl_cffi'],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=180
         )
         if result.returncode == 0:
             print("yt-dlp 更新成功")
@@ -74,6 +77,13 @@ def update_yt_dlp():
             import importlib
             importlib.reload(yt_dlp)
             print(f"当前 yt-dlp 版本: {yt_dlp.version.__version__}")
+            # impersonation 依赖自检：缺了它 YouTube 字幕必然 429
+            try:
+                import curl_cffi
+                print(f"当前 curl_cffi 版本: {curl_cffi.__version__} (impersonation 可用)")
+            except ImportError:
+                print("警告: 未安装 curl_cffi，yt-dlp 无法使用 impersonation，"
+                      "YouTube 字幕下载可能返回 HTTP 429")
         else:
             print(f"yt-dlp 更新失败: {result.stderr}")
     except Exception as e:
@@ -85,39 +95,93 @@ if not _yt_dlp_updated:
     update_yt_dlp()
     _yt_dlp_updated = True
 
-def run_yt_dlp_subprocess(args, cookies_path=None):
-    # Prefer calling yt-dlp directly to avoid python -m issues (like 'main.py error')
-    cmd = [
-        'yt-dlp',
+# ---- yt-dlp 调用封装：可执行文件回退 + 指数退避重试 + 确定性字幕文件选择 ----
+YTDLP_RETRY_ATTEMPTS = 3
+YTDLP_RETRY_BASE_DELAY = 15
+YTDLP_RETRYABLE_KEYWORDS = (
+    '429', 'Too Many Requests', '403', 'Forbidden',
+    'timed out', 'timeout', 'Connection reset',
+    'Temporary failure', 'EOF occurred', 'Connection aborted',
+)
+# 字幕语言优先级：'en-orig' 指向唯一的原生 ASR 轨（kind=asr，无 tlang），
+# 稳定且带词级时间戳；而 'en' 会把原生 ASR 与大量机器翻译轨（tlang=en）
+# 混在同一个 key 下，其中翻译轨会被 YouTube 严格限流并返回 429。
+SUB_LANG_CANDIDATES = ('en-orig', 'en')
+
+
+def _ytdlp_prefix():
+    """返回 yt-dlp 调用前缀：优先可执行文件，找不到则回退 python -m yt_dlp。"""
+    exe = shutil.which('yt-dlp')
+    if exe:
+        return [exe]
+    return [sys.executable, '-m', 'yt_dlp']
+
+
+def _build_ytdlp_cmd(prefix, args, cookies_path=None):
+    """组装完整命令。cookies 必须接在完整前缀之后（前缀可能是 python -m yt_dlp）。"""
+    cmd = list(prefix) + [
         '--extractor-args', 'youtube:player_client=default,-web_safari',
         '--remote-components', 'ejs:github',
-        '--no-playlist'
+        '--no-playlist',
     ]
     if cookies_path:
-        cmd.extend(['--cookies', cookies_path])
-    
-    cmd.extend(args)
-    
-    # Debug info
-    print(f"Executing yt-dlp command: {' '.join(cmd)}")
-    
-    # Use shell=False for security, assuming args are clean
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-    
-    if result.returncode != 0:
-        # Fallback to python -m yt_dlp if binary is not found, but log it
-        if "No such file or directory" in str(result.stderr) or result.returncode == 127:
-             print("yt-dlp binary not found, falling back to python -m yt_dlp")
-             import sys
-             cmd[0] = sys.executable
-             cmd.insert(1, '-m')
-             cmd.insert(2, 'yt_dlp')
-             print(f"Executing fallback command: {' '.join(cmd)}")
-             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        cmd += ['--cookies', cookies_path]
+    return cmd + list(args)
 
-        if result.returncode != 0:
-            raise Exception(f"yt-dlp error: {result.stderr}")
-    return result.stdout
+
+def _is_retryable(text):
+    text = text or ''
+    return any(kw in text for kw in YTDLP_RETRYABLE_KEYWORDS)
+
+
+def _pick_subtitle_file(subtitles_dir, sub_lang=None):
+    """确定性挑选 VTT：优先精确匹配 .<lang>.vtt，否则取排序后的第一个。"""
+    files = sorted(Path(subtitles_dir).glob('*.vtt'))
+    if not files:
+        return None
+    if sub_lang:
+        for f in files:
+            if f.name.endswith(f'.{sub_lang}.vtt'):
+                return f
+    return files[0]
+
+
+def run_yt_dlp_subprocess(args, cookies_path=None):
+    """执行 yt-dlp，遇到 429/403/网络抖动时指数退避重试。"""
+    prefix = _ytdlp_prefix()
+    cmd = _build_ytdlp_cmd(prefix, args, cookies_path)
+
+    last_result = None
+    for attempt in range(YTDLP_RETRY_ATTEMPTS):
+        print(f"Executing yt-dlp command: {' '.join(cmd)}")
+        try:
+            # Use shell=False for security, assuming args are clean
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    encoding='utf-8', errors='ignore')
+        except FileNotFoundError:
+            # 可执行文件实际不可用 → 回退 python -m yt_dlp 后重试
+            if prefix[0] != sys.executable:
+                print("yt-dlp 可执行文件不可用，回退到 python -m yt_dlp")
+                prefix = [sys.executable, '-m', 'yt_dlp']
+                cmd = _build_ytdlp_cmd(prefix, args, cookies_path)
+                continue
+            raise
+
+        if result.returncode == 0:
+            return result.stdout
+
+        last_result = result
+        err = f"{result.stderr or ''}\n{result.stdout or ''}"
+
+        if attempt < YTDLP_RETRY_ATTEMPTS - 1 and _is_retryable(err):
+            delay = YTDLP_RETRY_BASE_DELAY * (2 ** attempt)
+            print(f"yt-dlp 可重试错误（第 {attempt + 1}/{YTDLP_RETRY_ATTEMPTS} 次），"
+                  f"{delay}s 后重试...")
+            time.sleep(delay)
+            continue
+        break
+
+    raise Exception(f"yt-dlp error: {last_result.stderr}")
 
 import edge_tts
 from bilibili_api import sync, video_uploader, Credential
@@ -368,23 +432,31 @@ def background_workflow_task(config):
                     time.sleep(2 ** attempt)
 
         def dl_sub():
-            args = [
-                '--write-auto-sub',
-                '--skip-download',
-                '--sub-langs', 'en',
-                '--quiet',
-                '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
-                workflow_url
-            ]
-            run_yt_dlp_subprocess(args, cookies_file_path)
-            vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
-            if not vtt_files: raise Exception("未找到VTT文件")
-            original_file = vtt_files[0]
-            new_file = os.path.join(subtitles_dir, "word_level.vtt")
-            # 如果存在则覆盖
-            if os.path.exists(new_file): os.remove(new_file)
-            os.rename(original_file, new_file)
-            return new_file
+            last_err = None
+            for sub_lang in SUB_LANG_CANDIDATES:
+                args = [
+                    '--write-auto-sub',
+                    '--skip-download',
+                    '--sub-langs', sub_lang,
+                    '--quiet',
+                    '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+                    workflow_url
+                ]
+                try:
+                    run_yt_dlp_subprocess(args, cookies_file_path)
+                    original_file = _pick_subtitle_file(subtitles_dir, sub_lang)
+                    if not original_file:
+                        raise Exception(f"未找到 {sub_lang} 的VTT文件")
+                except Exception as e:
+                    last_err = e
+                    print(f"字幕语言 {sub_lang} 下载失败: {e}")
+                    continue
+                new_file = os.path.join(subtitles_dir, "word_level.vtt")
+                # 如果存在则覆盖
+                if os.path.exists(new_file): os.remove(new_file)
+                os.rename(original_file, new_file)
+                return new_file
+            raise Exception(f"字幕下载失败: {last_err}")
 
         vtt_file_path = retry_op(dl_sub)
         WorkflowManager.update_step(temp_dir, "下载字幕", "success", f"已保存: {os.path.basename(vtt_file_path)}")
@@ -2000,21 +2072,29 @@ with tab1:
                         with open(cookies_file_path, 'w', encoding='utf-8') as f:
                             f.write(YT_COOKIES.strip())
                     
-                    args = [
-                        '--write-auto-sub',
-                        '--skip-download',
-                        '--sub-langs', 'en',
-                        '--quiet',
-                        '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
-                        youtube_url
-                    ]
-                    run_yt_dlp_subprocess(args, cookies_file_path)
+                    downloaded = None
+                    for sub_lang in SUB_LANG_CANDIDATES:
+                        args = [
+                            '--write-auto-sub',
+                            '--skip-download',
+                            '--sub-langs', sub_lang,
+                            '--quiet',
+                            '-o', os.path.join(subtitles_dir, '%(title)s.%(ext)s'),
+                            youtube_url
+                        ]
+                        try:
+                            run_yt_dlp_subprocess(args, cookies_file_path)
+                            downloaded = _pick_subtitle_file(subtitles_dir, sub_lang)
+                        except Exception as e:
+                            print(f"字幕语言 {sub_lang} 下载失败: {e}")
+                            downloaded = None
+                        if downloaded:
+                            break
                     
-                    vtt_files = list(Path(subtitles_dir).glob("*.vtt"))
-                    if vtt_files:
-                        original_file = vtt_files[0]
+                    if downloaded:
                         new_file = os.path.join(subtitles_dir, "word_level.vtt")
-                        os.rename(original_file, new_file)
+                        if os.path.exists(new_file): os.remove(new_file)
+                        os.rename(downloaded, new_file)
                         st.success(f"字幕下载成功！")
                         st.info(f"文件位置: {new_file}")
                     else:
